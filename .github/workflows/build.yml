@@ -6,10 +6,10 @@ jobs:
     container: ps2dev/ps2dev:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compilar
-              run: |
-        apt-get update && apt-get install -y make
-        make -f Makefile.ps2
+      - name: Compilador
+        run: |
+          apt-get update && apt-get install -y make
+          make -f Makefile.ps2
       - uses: actions/upload-artifact@v4
         with:
           name: fceumm-ps2-exfat
