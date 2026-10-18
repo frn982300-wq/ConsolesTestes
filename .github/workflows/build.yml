@@ -7,7 +7,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Compilar
-        run: make -f Makefile.ps2
+              run: |
+        apt-get update && apt-get install -y make
+        make -f Makefile.ps2
       - uses: actions/upload-artifact@v4
         with:
           name: fceumm-ps2-exfat
