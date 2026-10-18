@@ -1,0 +1,14 @@
+name: Build PS2 exFAT
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ps2dev/ps2dev:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar
+        run: make -f Makefile.ps2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fceumm-ps2-exfat
+          path: "*.elf"
