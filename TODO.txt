@@ -1,0 +1,5 @@
+- add 480p
+- add multitap support
+- add portabilty (ability to use settings from within launched device)
+- return CD support :)
+- endian.c and endian.h needs to be removed from fceumm-ps2 directory

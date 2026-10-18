@@ -1,0 +1,18 @@
+FCEUMM PS2 0.3.3 - tentativa de integracao USB exFAT
+
+O QUE FOI ALTERADO
+- Drivers usbd.irx e usbhdfsd.irx fornecidos pelo usuario foram incluidos no projeto.
+- Makefile.ps2 usa estes drivers locais em vez dos drivers do PS2SDK.
+- Workflow do GitHub Actions para tentar compilar e disponibilizar ELF.
+
+IMPORTANTE: este pacote NAO foi compilado nem testado em PS2. A compatibilidade real com exFAT e FAT32 ainda nao foi comprovada. O projeto e antigo e pode exigir ajustes adicionais no PS2SDK atual.
+
+NO ANDROID
+1. Crie uma conta no github.com, caso nao tenha.
+2. Crie um repositorio novo e envie o CONTEUDO da pasta Fceumm-PS2-0.3.3, inclusive .github/workflows/build-ps2.yml.
+3. Entre na aba Actions do repositorio e escolha Compilar Fceumm PS2 USB exFAT.
+4. Toque em Run workflow.
+5. Se o processo terminar com sucesso, baixe o artefato Fceumm-PS2-USB-exFAT-ELF.
+6. Se falhar, abra o log da etapa com erro para identificar o ajuste necessario.
+
+Observacao: o GitHub pode solicitar habilitacao do Actions para o repositorio.
