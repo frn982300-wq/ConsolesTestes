@@ -53,46 +53,71 @@ jobs:
           makefile = Path('Makefile.ps2')
           lines = makefile.read_text().splitlines(keepends=True)
           found = False
+
           for index, line in enumerate(lines):
               if line.startswith('PLATFORM_DEFINES ='):
-                  lines[index] = line.rstrip('\n') + ' -DNEWLIB_PORT_AWARE\n'
+                  if '-DNEWLIB_PORT_AWARE' not in line:
+                      lines[index] = line.rstrip('\n') + ' -DNEWLIB_PORT_AWARE\n'
                   found = True
                   break
+
           if not found:
               raise RuntimeError('PLATFORM_DEFINES was not found')
+
           makefile.write_text(''.join(lines))
 
           browser = Path('src/drivers/ps2/browser.c')
           source = browser.read_text()
+
           if 'fio_dirent_t buf;' not in source:
-              raise RuntimeError('Expected legacy directory type was not found')
-          source = source.replace('fio_dirent_t buf;', 'io_dirent_t buf;', 1)
+              raise RuntimeError('Legacy directory type was not found')
+
+          source = source.replace(
+              'fio_dirent_t buf;',
+              'io_dirent_t buf;',
+              1
+          )
           browser.write_text(source)
 
           config = Path('src/drivers/ps2/cnfsettings.c')
           source = config.read_text()
+
           for declaration in ('int true = 1;\n', 'int false = 0;\n'):
               if declaration not in source:
-                  raise RuntimeError('Expected legacy Boolean declaration was not found')
+                  raise RuntimeError('Legacy Boolean declaration not found')
               source = source.replace(declaration, '', 1)
-          source = source.replace("(tp!='\\0')", "(*tp!='\\0')")
+
+          source = source.replace(
+              "(tp!='\\0')",
+              "(*tp!='\\0')"
+          )
+
           for header in ('<stdlib.h>', '<fileio.h>', '<sys/fcntl.h>'):
               if '#include ' + header not in source:
                   source = '#include ' + header + '\n' + source
+
           config.write_text(source)
 
           main = Path('src/drivers/ps2/main.c')
           source = main.read_text()
+
           if source.count('#include <libjpg.h>') != 1:
-              raise RuntimeError('Expected legacy JPEG header was not found')
+              raise RuntimeError('Legacy JPEG header was not found')
+
           source = source.replace('#include <libjpg.h>\n', '', 1)
+
           if '#include <stdlib.h>' not in source:
               source = '#include <stdlib.h>\n' + source
+
           if '#include <malloc.h>' not in source:
               source = '#include <malloc.h>\n' + source
 
           start = source.find('    // Setup GUI Textures\n')
-          end = source.find('    if (!(ret = FCEUI_Initialize()))', start)
+          end = source.find(
+              '    if (!(ret = FCEUI_Initialize()))',
+              start
+          )
+
           if start == -1 or end == -1 or 'jpgOpenFILE' not in source[start:end]:
               raise RuntimeError('Legacy JPEG loading section was not found')
 
@@ -128,11 +153,31 @@ jobs:
               }
 
           '''
+
           source = source[:start] + replacement + source[end:]
+
           if 'jpgOpenFILE' in source or '#include <libjpg.h>' in source:
               raise RuntimeError('Legacy JPEG calls still remain')
+
           main.write_text(source)
-          print('PS2SDK and gsKit JPEG compatibility patches applied')
+
+          font = Path('src/drivers/ps2/ps2font.c')
+          source = font.read_text()
+
+          if '#include <stdlib.h>' not in source:
+              source = '#include <stdlib.h>\n' + source
+
+          font.write_text(source)
+
+          menu = Path('src/drivers/ps2/menu.c')
+          source = menu.read_text()
+
+          if '#include <string.h>' not in source:
+              source = '#include <string.h>\n' + source
+
+          menu.write_text(source)
+
+          print('PS2SDK, JPEG, memory and menu patches applied')
           PY
 
       - name: Build PS2 ELF
