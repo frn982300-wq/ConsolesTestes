@@ -88,6 +88,8 @@ jobs:
           source = source.replace('#include <libjpg.h>\n', '', 1)
           if '#include <stdlib.h>' not in source:
               source = '#include <stdlib.h>\n' + source
+          if '#include <malloc.h>' not in source:
+              source = '#include <malloc.h>\n' + source
 
           start = source.find('    // Setup GUI Textures\n')
           end = source.find('    if (!(ret = FCEUI_Initialize()))', start)
