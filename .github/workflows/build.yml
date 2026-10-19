@@ -151,6 +151,28 @@ jobs:
               )
           PYCODE
 
+      - name: Fix FDS audio function declaration
+        working-directory: FCEUmm-PS2-exFAT
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+
+          path = Path('src/fds.c')
+          source = path.read_text()
+
+          old = 'void FDSSound();'
+          new = 'void FDSSound(int c);'
+
+          if old in source:
+              source = source.replace(old, new, 1)
+              path.write_text(source)
+              print('FDS audio declaration updated.')
+          elif new in source:
+              print('FDS audio declaration already updated.')
+          else:
+              raise RuntimeError('FDS audio declaration not found.')
+          PYCODE
+
       - name: Compile PS2 ELF
         working-directory: FCEUmm-PS2-exFAT
         shell: sh
@@ -161,11 +183,11 @@ jobs:
             echo "PS2 build completed."
             tail -n 50 build.log
           else
-            echo "PS2 build failed. Compiler and linker errors:"
+            echo "PS2 build failed. First compiler or linker errors:"
 
             grep -n -m 40 -E 'fatal error:|error:|undefined reference|No such file|Error [0-9]+' build.log || true
 
-            echo "Last 120 lines of build log:"
+            echo "Last 120 lines of the build log:"
             tail -n 120 build.log
 
             exit 1
