@@ -1,44 +1,60 @@
-name: Build PS2
+
+name: Build FCEUmm PS2
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     container:
       image: ps2dev/ps2dev:latest
-    timeout-minutes: 15
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download FCEUmm
+      - name: Install dependencies
         run: |
-          apk add --no-cache git
-          git clone --depth 1 https://github.com/libretro/fceumm.git fceumm
-          ls -la fceumm
+          apk add --no-cache git make build-base
 
-      - name: Build PS2
+      - name: Verify PS2 toolchain
         run: |
-          cd fceumm
-          # PATCH: Fix missing stdlib.h bug in browser.c
-          sed -i '1i #include <stdlib.h>' src/drivers/ps2/browser.c || true
-          sed -i '1i #include <stdlib.h>' src/drivers/ps2/Reboot_ELF.c || true
-          # Build ignoring warnings from old code
-          make -f Makefile.libretro platform=ps2 -j4 CFLAGS="-Wno-implicit-function-declaration -fcommon -std=gnu99" CXXFLAGS="-Wno-implicit-function-declaration -fcommon"
+          echo "Checking PS2 development tools..."
+          command -v mips64r5900el-ps2-elf-gcc
+          command -v make
+          test -d "$PS2SDK"
+          test -d "$GSKIT"
 
-      - name: Find ELF
+      - name: Download FCEUmm PS2
         run: |
-          find . -name "*.elf" -o -name "*.ELF"
-          ls -lh fceumm/*.elf || ls -lh *.elf || true
+          git clone --depth 1 \
+            https://github.com/ps2homebrew/Fceumm-PS2.git \
+            fceumm-ps2
+          test -f fceumm-ps2/Makefile
+          echo "Source code downloaded successfully!"
+
+      - name: Build PS2 ELF
+        working-directory: fceumm-ps2
+        run: |
+          make NOT_PACKED=1 -j2
+
+      - name: Verify ELF
+        run: |
+          test -s fceumm-ps2/fceu.elf
+          ls -lh fceumm-ps2/fceu.elf
+          echo "ELF build completed successfully!"
 
       - name: Upload ELF
         uses: actions/upload-artifact@v4
         with:
-          name: fceumm-ps2
-          path: |
-            **/*.elf
-          if-no-files-found: warn
+          name: FCEUmm-PS2-ELF
+          path: fceumm-ps2/fceu.elf
+          if-no-files-found: error
