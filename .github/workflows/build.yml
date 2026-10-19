@@ -65,7 +65,7 @@ jobs:
           grep -q '#include <malloc.h>' src/drivers/ps2/main.c
           grep -q '#include <stdlib.h>' src/drivers/ps2/ps2font.c
           grep -q '#include <string.h>' src/drivers/ps2/menu.c
-          echo "Compatibility patches and drivers verified."
+          echo "Source patches and exFAT driver files are present."
 
       - name: Fix CopyFami name ownership
         working-directory: FCEUmm-PS2-exFAT
@@ -75,9 +75,7 @@ jobs:
 
           path = Path('src/fceu.c')
           code = path.read_text()
-
           before = 'GameInfo->name = "copyfami";'
-
           after = (
               'GameInfo->name = (uint8 *)malloc(sizeof("copyfami"));\n'
               '\tif (!GameInfo->name) {\n'
@@ -91,14 +89,14 @@ jobs:
           if before in code:
               code = code.replace(before, after, 1)
               path.write_text(code)
-              print('CopyFami allocation fixed.')
+              print('CopyFami name allocation fixed.')
           elif 'malloc(sizeof("copyfami"))' in code:
-              print('CopyFami already fixed.')
+              print('CopyFami name allocation already fixed.')
           else:
-              raise RuntimeError('CopyFami assignment not found.')
+              raise RuntimeError('Expected CopyFami assignment not found.')
           PY
 
-      - name: Fix legacy network declarations
+      - name: Fix legacy network function declarations
         working-directory: FCEUmm-PS2-exFAT
         run: |
           python3 - <<'PYCODE'
@@ -143,13 +141,12 @@ jobs:
                       + '\n'
                       + source[match.end():]
                   )
-
                   path.write_text(source)
 
               print(f'Network declarations verified: {filename}')
           PYCODE
 
-      - name: Fix FDS audio declaration
+      - name: Fix FDS audio function declaration
         working-directory: FCEUmm-PS2-exFAT
         run: |
           python3 - <<'PYCODE'
@@ -166,9 +163,9 @@ jobs:
               path.write_text(source)
               print('FDS audio declaration fixed.')
           elif new in source:
-              print('FDS audio already fixed.')
+              print('FDS audio declaration already fixed.')
           else:
-              raise RuntimeError('FDS declaration not found.')
+              raise RuntimeError('FDS audio declaration not found.')
           PYCODE
 
       - name: Fix legacy asprintf availability
@@ -190,22 +187,84 @@ jobs:
               '',
               1
           )
-
           path.write_text(source)
 
           general = Path('src/general.c').read_text()
 
           if '#ifndef HAVE_ASPRINTF' not in general:
-              raise RuntimeError(
-                  'Missing built-in asprintf fallback.'
-              )
+              raise RuntimeError('Missing asprintf fallback.')
 
           if 'static int asprintf(' not in general:
-              raise RuntimeError(
-                  'Missing legacy asprintf implementation.'
-              )
+              raise RuntimeError('Missing asprintf implementation.')
 
           print('Built-in asprintf implementation enabled.')
+          PYCODE
+
+      - name: Fix duplicate zlib linker symbols
+        working-directory: FCEUmm-PS2-exFAT
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+
+          makefile = Path('Makefile.ps2')
+          source = makefile.read_text()
+
+          old_directories = (
+              'FCEU_SRC_DIRS := $(PS2_DIR) $(FCEU_DIR) '
+              '$(FCEU_DIR)/boards $(FCEU_DIR)/input  '
+              '$(FCEU_DIR)/mappers $(ZLIB_DIR)'
+          )
+
+          new_directories = old_directories.replace(
+              ' $(ZLIB_DIR)',
+              ''
+          )
+
+          old_sources = (
+              'FCEU_CSRCS := $(foreach dir,$(FCEU_SRC_DIRS),'
+              '$(wildcard $(dir)/*.c))'
+          )
+
+          new_sources = (
+              old_sources
+              + '\nFCEU_CSRCS += $(ZLIB_DIR)/unzip.c'
+          )
+
+          if source.count(old_directories) != 1:
+              raise RuntimeError(
+                  'Unexpected FCEU_SRC_DIRS layout'
+              )
+
+          if source.count(old_sources) != 1:
+              raise RuntimeError(
+                  'Unexpected FCEU_CSRCS layout'
+              )
+
+          if '-lz' not in source:
+              raise RuntimeError(
+                  'Missing PS2SDK zlib linker option'
+              )
+
+          source = source.replace(
+              old_directories,
+              new_directories,
+              1
+          )
+
+          source = source.replace(
+              old_sources,
+              new_sources,
+              1
+          )
+
+          makefile.write_text(source)
+
+          assert '$(ZLIB_DIR)' not in new_directories
+          assert 'FCEU_CSRCS += $(ZLIB_DIR)/unzip.c' in source
+          assert '-lz' in source
+
+          print('Using PS2SDK libz.')
+          print('Legacy ZIP file reader preserved.')
           PYCODE
 
       - name: Compile PS2 ELF
@@ -221,7 +280,7 @@ jobs:
             echo "PS2 compilation failed."
             echo "Compiler and linker errors:"
 
-            grep -n -m 40 -E 'fatal error:|error:|undefined reference|No such file|Error [0-9]+' build.log || true
+            grep -n -m 40 -E 'fatal error:|error:|undefined reference|multiple definition|cannot find|No such file|Error [0-9]+' build.log || true
 
             echo "Last 120 lines of the build log:"
             tail -n 120 build.log
