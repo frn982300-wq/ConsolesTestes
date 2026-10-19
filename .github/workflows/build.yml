@@ -34,7 +34,7 @@ jobs:
           cat > ps2-menu-test/menu_test.c <<'END_PS2_C_SOURCE'
           /* Minimal PlayStation 2 video boot diagnostic. */
           /* NOT a Beetle PCE Fast emulator port. */
-          /* No games, ROM loading or USB initialization. */
+          /* No ROM loading or USB/exFAT initialization. */
 
           #include <gsKit.h>
           #include <dmaKit.h>
@@ -110,9 +110,7 @@ jobs:
               u64 color
           )
           {
-              int i;
-              int row;
-              int col;
+              int i, row, col;
 
               for (i = 0; message[i] != '\0'; ++i) {
                   const FontGlyph *glyph = find_glyph(message[i]);
@@ -143,11 +141,7 @@ jobs:
           int main(int argc, char **argv)
           {
               GSGLOBAL *gs;
-              u64 background;
-              u64 panel;
-              u64 accent;
-              u64 text;
-              u64 muted;
+              u64 background, panel, accent, text, muted;
 
               (void)argc;
               (void)argv;
@@ -184,9 +178,7 @@ jobs:
 
               gsKit_clear(gs, background);
 
-              gsKit_prim_sprite(
-                  gs, 48, 43, 58, 141, 1, accent
-              );
+              gsKit_prim_sprite(gs, 48, 43, 58, 141, 1, accent);
 
               print_pixels(
                   gs, 76, 60, 3,
@@ -262,9 +254,11 @@ jobs:
           clean:
           	rm -f $(EE_BIN) $(EE_OBJS)
 
-          include $(GSKIT)/Makefile.pref
+          EE_INCS += -I$(GSKIT)/include
+          EE_LDFLAGS += -L$(GSKIT)/lib
+
+          include $(PS2SDK)/samples/Makefile.pref
           include $(PS2SDK)/samples/Makefile.eeglobal
-          include $(GSKIT)/Makefile.global
           END_PS2_MAKEFILE
 
       - name: Compile PlayStation 2 menu ELF
