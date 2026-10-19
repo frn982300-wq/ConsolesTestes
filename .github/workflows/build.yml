@@ -1,4 +1,5 @@
-name: Beetle PCE Fast PS2 exFAT Real ROM Trace V10
+
+name: Beetle PCE Fast PS2 exFAT Speed Mode ROM Trace V11
 
 on:
   push:
@@ -10,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Build V10 actual game ROM bootstrap trace
+    name: Build V11 CPU clock mode and ROM trace
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -29,884 +30,168 @@ jobs:
         shell: sh
         run: |
           set -eu
-          mkdir -p ps2-v10
+          mkdir -p ps2-v11
           test -s FCEUmm-PS2-exFAT-integrated-2026.zip
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
             FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx \
-            > ps2-v10/usbd.irx
+            > ps2-v11/usbd.irx
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
             FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx \
-            > ps2-v10/usbhdfsd.irx
-          test -s ps2-v10/usbd.irx
-          test -s ps2-v10/usbhdfsd.irx
+            > ps2-v11/usbhdfsd.irx
+          test -s ps2-v11/usbd.irx
+          test -s ps2-v11/usbhdfsd.irx
           test -s "$PS2SDK/iop/irx/iomanX.irx"
           test -s "$PS2SDK/iop/irx/fileXio.irx"
           command -v bin2c
 
-      - name: Generate standalone V10 source
+      - name: Restore full embedded V11 source
         shell: sh
         run: |
           set -eu
-          mkdir -p ps2-v10
-          cat > ps2-v10/app.c <<'END_V10_C'
-          /* PS2 exFAT V10: real-ROM bounded instruction trace (not game emulation).
-           * V9 synthetic tests plus bounded real-ROM trace; not a playable emulator.
-           * Keeps the working V8 read-only USB and gamepad routines. */
-          #include <gsKit.h>
-          #include <dmaKit.h>
-          #include <stddef.h>
-          #include <sifrpc.h>
-          #include <loadfile.h>
-          #include <libpad.h>
-          #include <sbv_patches.h>
-          #include <iopheap.h>
-          #include <fileXio_rpc.h>
-          #include <io_common.h>
-          #include <iox_stat.h>
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include <ctype.h>
-          
-          #define MAX_ITEMS 120
-          #define VISIBLE 8
-          #define PATH_MAX_LEN 512
-          #define NAME_MAX_LEN 256
-          #define CHUNK 16384
-          #define ROM_MAX (8*1024*1024)
-          #define ROM_BANK 8192
-          
-          static const char fontkeys[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:.";
-          static const unsigned long long fontbits[] = {
-              0x4631fc62eULL, 0x3e317c62fULL, 0x78210843eULL, 0x3e318c62fULL, 0x7c217843fULL,
-              0x04217843fULL, 0x3a31e843eULL, 0x4631fc631ULL, 0x7c842109fULL, 0x19294211cULL,
-              0x452519531ULL, 0x7c2108421ULL, 0x4631ad771ULL, 0x4631cd671ULL, 0x3a318c62eULL,
-              0x04217c62fULL, 0x59358c62eULL, 0x45257c62fULL, 0x3e107043eULL, 0x10842109fULL,
-              0x3a318c631ULL, 0x11518c631ULL, 0x4775ac631ULL, 0x462a22a31ULL, 0x108422a31ULL,
-              0x7c222221fULL, 0x3a33ae62eULL, 0x3884210c4ULL, 0x7c444422eULL, 0x3e107420fULL,
-              0x211f4a988ULL, 0x3e107843fULL, 0x3a317842eULL, 0x08422221fULL, 0x3a317462eULL,
-              0x3a10f462eULL, 0x0000f8000ULL, 0x042222210ULL, 0x008401080ULL, 0x18c000000ULL
-          };
-          static void text5(GSGLOBAL *gs,int x,int y,int scale,const char *s,u64 color)
-          {
-              int i,r,c,j;
-              for (i=0;s[i];i++) {
-                  char ch=(char)toupper((unsigned char)s[i]);
-                  unsigned long long bitmap=0;
-                  for(j=0;fontkeys[j];j++) if(fontkeys[j]==ch){bitmap=fontbits[j];break;}
-                  for(r=0;r<7;r++) for(c=0;c<5;c++) {
-                      if(bitmap & (1ULL << (r*5+c))) {
-                          float px=(float)(x+(i*6+c)*scale);
-                          float py=(float)(y+r*scale);
-                          gsKit_prim_sprite(gs,px,py,px+scale,py+scale,1,color);
-                      }
-                  }
-              }
-          }
-          
-          extern unsigned char exfat_bdm_irx[],exfat_usb_irx[],iomanx_irx[],filexio_irx[];
-          extern unsigned int size_exfat_bdm_irx,size_exfat_usb_irx,size_iomanx_irx,size_filexio_irx;
-          static char pad_buffer[256] __attribute__((aligned(64)));
-          static iox_dirent_t dir_entry __attribute__((aligned(64)));
-          static iox_stat_t file_stat __attribute__((aligned(64)));
-          static unsigned char io_buffer[CHUNK] __attribute__((aligned(64)));
-          static unsigned char *rom=NULL;
-          
-          typedef struct { char name[NAME_MAX_LEN]; int directory; } Item;
-          static Item items[MAX_ITEMS];
-          static int count=0,selected=0,screen=0,hidden=0;
-          static int pad_ok=0,usb_ok=0,usb_error=0,listing_error=0;
-          static unsigned oldkeys=0;
-          static char current_path[PATH_MAX_LEN]="mass:/";
-          static char full_path[PATH_MAX_LEN]="";
-          static int size_rom=0,read_rom=0,blocks=0,last_pos=0,error_rom=0,loaded=0;
-          static unsigned int disk_crc=0,ram_crc=0;
-          static int header_skip=0,bank_count=0,vector_pc=0,vector_opcode=0;
-          static int mapping_ok=0;
-          static unsigned char mpr[8];
-          
-          static unsigned crc_step(unsigned crc,const unsigned char *data,int n)
-          {
-              int i,k;
-              for(i=0;i<n;i++) {
-                  crc^=data[i];
-                  for(k=0;k<8;k++) crc=(crc & 1u) ? ((crc>>1)^0xEDB88320u):(crc>>1);
-              }
-              return crc;
-          }
-          static int pad_start(void)
-          {
-              int a,b;
-              SifInitRpc(0);
-              a=SifLoadModule("rom0:XSIO2MAN",0,NULL);
-              b=SifLoadModule("rom0:XPADMAN",0,NULL);
-              if(a<0||b<0||padInit(0)!=1) return 0;
-              pad_ok=padPortOpen(0,0,pad_buffer)!=0;
-              return pad_ok;
-          }
-          static unsigned keys_new(void)
-          {
-              struct padButtonStatus buttons;
-              int state;
-              unsigned now,delta;
-              if(!pad_ok) return 0;
-              state=padGetState(0,0);
-              if(state!=PAD_STATE_STABLE && state!=PAD_STATE_FINDCTP1){oldkeys=0;return 0;}
-              if(!padRead(0,0,&buttons)) return 0;
-              now=(unsigned)(0xffffu^buttons.btns);
-              delta=now & ~oldkeys;
-              oldkeys=now;
-              return delta;
-          }
-          static int module_load(const void *data,unsigned size)
-          {
-              int result=0, id=SifExecModuleBuffer((void *)data,size,0,NULL,&result);
-              if(id<0) return id;
-              return result<0 ? result : 0;
-          }
-          static int usb_start(void)
-          {
-              int rc;
-              if(usb_ok) return 0;
-              SifLoadFileInit();
-              SifInitIopHeap();
-              sbv_patch_enable_lmb();
-              rc=module_load(iomanx_irx,size_iomanx_irx);
-              if(rc<0) return rc;
-              rc=module_load(filexio_irx,size_filexio_irx);
-              if(rc<0) return rc;
-              rc=fileXioInit();
-              if(rc<0) return rc;
-              rc=module_load(exfat_bdm_irx,size_exfat_bdm_irx);
-              if(rc<0) return rc;
-              rc=module_load(exfat_usb_irx,size_exfat_usb_irx);
-              if(rc<0) return rc;
-              usb_ok=1;
-              return 0;
-          }
-          static int is_rom(const char *name)
-          {
-              const char *ext=strrchr(name,'.');
-              if(!ext||strlen(ext)!=4) return 0;
-              return (tolower((unsigned char)ext[1])=='p' &&
-                      tolower((unsigned char)ext[2])=='c' &&
-                      tolower((unsigned char)ext[3])=='e') ||
-                     (tolower((unsigned char)ext[1])=='s' &&
-                      tolower((unsigned char)ext[2])=='g' &&
-                      tolower((unsigned char)ext[3])=='x');
-          }
-          static int compare_items(const void *aa,const void *bb)
-          {
-              const Item *a=(const Item *)aa,*b=(const Item *)bb;
-              int i;
-              if(a->directory!=b->directory) return b->directory-a->directory;
-              for(i=0;i<NAME_MAX_LEN;i++) {
-                  int x=tolower((unsigned char)a->name[i]);
-                  int y=tolower((unsigned char)b->name[i]);
-                  if(x!=y) return x-y;
-                  if(!x) break;
-              }
-              return 0;
-          }
-          static int list_dir(void)
-          {
-              int d,rc,n,folder;
-              count=0;hidden=0;selected=0;listing_error=0;
-              d=fileXioDopen(current_path);
-              if(d<0){listing_error=d;return d;}
-              for(n=0;n<2048;n++) {
-                  memset(&dir_entry,0,sizeof(dir_entry));
-                  rc=fileXioDread(d,&dir_entry);
-                  if(rc<=0){if(rc<0)listing_error=rc;break;}
-                  dir_entry.name[NAME_MAX_LEN-1]=0;
-                  if(!dir_entry.name[0]||!strcmp(dir_entry.name,".")||!strcmp(dir_entry.name,".."))continue;
-                  folder=FIO_S_ISDIR(dir_entry.stat.mode);
-                  if(!folder && !is_rom(dir_entry.name))continue;
-                  if(count>=MAX_ITEMS){hidden++;continue;}
-                  strcpy(items[count].name,dir_entry.name);
-                  items[count].directory=folder;
-                  count++;
-              }
-              fileXioDclose(d);
-              qsort(items,count,sizeof(Item),compare_items);
-              return listing_error;
-          }
-          static void up_dir(void)
-          {
-              int n=(int)strlen(current_path);
-              int root=!strncmp(current_path,"mass0:/",7)?7:6;
-              if(n<=root){screen=0;return;}
-              if(current_path[n-1]=='/')n--;
-              while(n>root && current_path[n-1]!='/')n--;
-              current_path[n]=0;
-              list_dir();
-          }
-          static void rom_free(void)
-          {
-              if(rom){free(rom);rom=NULL;}
-              loaded=0;mapping_ok=0;
-          }
-          /* First CPU integration prerequisite: logical 64 KiB address pages (8 KiB)
-           * mapped through HuC6280's MPR to physical 8 KiB HuCard banks.
-           * Only cartridge ROM reads are represented here. RAM/IO/IRQ are NOT. */
-          static unsigned char mapped_read(unsigned short address)
-          {
-              unsigned page=((unsigned)address)>>13;
-              unsigned bank=mpr[page];
-              unsigned offset=header_skip+bank*ROM_BANK+(address & (ROM_BANK-1));
-              if(!rom || bank>=(unsigned)bank_count || offset>=(unsigned)size_rom) return 0xff;
-              return rom[offset];
-          }
-          static void cpu_map_probe(void)
-          {
-              int i;
-              header_skip=(size_rom % ROM_BANK == 512)?512:0;
-              bank_count=(size_rom-header_skip)/ROM_BANK;
-              for(i=0;i<8;i++)mpr[i]=0;
-              /* HuC6280 reset maps MPR7 to physical bank 0. */
-              mpr[7]=0;
-              vector_pc=mapped_read(0xfffe)|((int)mapped_read(0xffff)<<8);
-              vector_opcode=mapped_read((unsigned short)vector_pc);
-              mapping_ok=(bank_count>0 && bank_count<=256);
-          }
-          static void rom_load(void)
-          {
-              int fd,rc,want,offset=0,close_rc;
-              unsigned crc=0xffffffffu;
-              rom_free();
-              size_rom=0;read_rom=0;blocks=0;last_pos=-9999;
-              disk_crc=0;ram_crc=0;error_rom=0;
-              memset(&file_stat,0,sizeof(file_stat));
-              rc=fileXioGetStat(full_path,&file_stat);
-              if(rc<0){error_rom=rc;return;}
-              if(file_stat.hisize!=0 || file_stat.size==0 || file_stat.size>ROM_MAX){error_rom=-100;return;}
-              size_rom=(int)file_stat.size;
-              rom=(unsigned char *)malloc((size_t)size_rom);
-              if(!rom){error_rom=-101;return;}
-              fd=fileXioOpen(full_path,FIO_O_RDONLY);
-              if(fd<0){error_rom=fd;rom_free();return;}
-              rc=fileXioLseek(fd,0,FIO_SEEK_SET);
-              if(rc!=0){error_rom=rc<0?rc:-102;}
-              while(error_rom==0 && offset<size_rom) {
-                  want=size_rom-offset;
-                  if(want>CHUNK)want=CHUNK;
-                  rc=fileXioRead(fd,io_buffer,want);
-                  if(rc<=0||rc>want){error_rom=rc<0?rc:-103;break;}
-                  memcpy(rom+offset,io_buffer,(size_t)rc);
-                  crc=crc_step(crc,io_buffer,rc);
-                  offset+=rc;
-                  blocks++;
-                  read_rom=offset;
-              }
-              last_pos=fileXioLseek(fd,0,FIO_SEEK_CUR);
-              close_rc=fileXioClose(fd);
-              disk_crc=crc^0xffffffffu;
-              if(error_rom==0 && (offset!=size_rom||last_pos!=size_rom))error_rom=-104;
-              if(error_rom==0 && close_rc<0)error_rom=close_rc;
-              if(error_rom==0) {
-                  ram_crc=crc_step(0xffffffffu,rom,size_rom)^0xffffffffu;
-                  if(ram_crc!=disk_crc)error_rom=-106;
-              }
-              if(error_rom!=0){rom_free();return;}
-              loaded=1;
-              cpu_map_probe();
-          }
-          
-          /* V9: incremental HuC6280 interpreter subset.
-           * Executes ONLY synthetic test programs in isolated mapped RAM.
-           * NOT the official Beetle PCE Fast emulator, NOT game execution.
-           * CPU cycle values approximate the individual supported opcodes.
-           */
-          #define F_C 0x01
-          #define F_Z 0x02
-          #define F_I 0x04
-          #define F_D 0x08
-          #define F_B 0x10
-          #define F_V 0x40
-          #define F_N 0x80
-          #define V9_TESTS 5
-          
-          typedef struct {
-              unsigned short pc;
-              unsigned char a,x,y,s,p,mpr[8];
-              unsigned char ram[8192];
-              int cycles,steps,error;
-          } HucTestCPU;
-          static HucTestCPU testcpu;
-          static int cpu_test_result=0;
-          static int cpu_tests_passed=0;
-          static int cpu_failed_test=0;
-          static int cpu_test_steps=0;
-          static int cpu_test_cycles=0;
-          static unsigned char cpu_last_opcode=0;
-          
-          /* Real ROM bootstrap trace. This is a LIMITED decoder from V9, not Beetle core.
-           * Trace never talks to emulated hardware: unknown I/O/unmapped accesses HALT.
-           * Only MPR7 is defined by a real reset. Other MPRs use 00 for this probe.
-           */
-          #define TRACE_MAX_STEPS 96
-          #define TRACE_UNSUPPORTED 1
-          #define TRACE_IO_READ 2
-          #define TRACE_IO_WRITE 3
-          #define TRACE_ROM_WRITE 4
-          #define TRACE_UNMAPPED_READ 5
-          #define TRACE_UNMAPPED_WRITE 6
-          #define TRACE_UNSUPPORTED_ALU 7
-          #define TRACE_STEP_LIMIT 8
-          #define TRACE_NO_ROM 9
-          static int trace_enabled=0;
-          static int trace_reason=0;
-          static unsigned short trace_address=0;
-          static unsigned char trace_bank=0;
-          static unsigned short trace_last_pc=0;
-          static unsigned char trace_last_op=0;
-          static unsigned short trace_history_pc[8];
-          static unsigned char trace_history_op[8];
-          static int trace_history_count=0;
-          static int trace_limit_used=0;
-          static void trace_fail(int reason,unsigned short addr,unsigned char bank)
-          {
-              if(trace_enabled && !trace_reason) {
-                  trace_reason=reason;
-                  trace_address=addr;
-                  trace_bank=bank;
-              }
-          }
-          static const char *trace_reason_text(int reason)
-          {
-              switch(reason) {
-              case TRACE_UNSUPPORTED: return "UNSUPPORTED OPCODE";
-              case TRACE_IO_READ: return "IO READ NOT EMULATED";
-              case TRACE_IO_WRITE: return "IO WRITE NOT EMULATED";
-              case TRACE_ROM_WRITE: return "ROM WRITE NOT EMULATED";
-              case TRACE_UNMAPPED_READ: return "UNMAPPED READ";
-              case TRACE_UNMAPPED_WRITE: return "UNMAPPED WRITE";
-              case TRACE_UNSUPPORTED_ALU: return "DECIMAL OR T FLAG ALU";
-              case TRACE_STEP_LIMIT: return "STEP LIMIT REACHED";
-              case TRACE_NO_ROM: return "NO ROM MAPPED";
-              default: return "NOT RUN";
-              }
-          }
-          
-          static unsigned char cpu_mem_read(unsigned short addr)
-          {
-              unsigned page=((unsigned)addr)>>13;
-              unsigned bank=testcpu.mpr[page];
-              unsigned offset=((unsigned)addr)&8191u;
-              unsigned location;
-              if(bank>=0xf8 && bank<=0xfb) return testcpu.ram[offset];
-              if(trace_enabled && bank==0xff) {
-                  trace_fail(TRACE_IO_READ,addr,(unsigned char)bank);
-                  return 0xff;
-              }
-              if(!rom || bank >= (unsigned)bank_count) {
-                  trace_fail(TRACE_UNMAPPED_READ,addr,(unsigned char)bank);
-                  return 0xff;
-              }
-              location=(unsigned)header_skip+bank*8192u+offset;
-              if(location >= (unsigned)size_rom) {
-                  trace_fail(TRACE_UNMAPPED_READ,addr,(unsigned char)bank);
-                  return 0xff;
-              }
-              return rom[location];
-          }
-          static void cpu_mem_write(unsigned short addr,unsigned char val)
-          {
-              unsigned bank=testcpu.mpr[((unsigned)addr)>>13];
-              if(bank>=0xf8 && bank<=0xfb) {
-                  testcpu.ram[((unsigned)addr)&8191u]=val;
-              } else if(bank==0xff) {
-                  trace_fail(TRACE_IO_WRITE,addr,(unsigned char)bank);
-              } else if(bank<(unsigned)bank_count) {
-                  trace_fail(TRACE_ROM_WRITE,addr,(unsigned char)bank);
-              } else {
-                  trace_fail(TRACE_UNMAPPED_WRITE,addr,(unsigned char)bank);
-              }
-          }
-          static unsigned char cpu_fetch(void)
-          {
-              unsigned char v=cpu_mem_read(testcpu.pc);
-              testcpu.pc=(unsigned short)(testcpu.pc+1u);
-              return v;
-          }
-          static unsigned short cpu_fetch_word(void)
-          {
-              unsigned low=cpu_fetch(),high=cpu_fetch();
-              return (unsigned short)(low|(high<<8));
-          }
-          static void cpu_zn(unsigned char v)
-          {
-              testcpu.p=(unsigned char)(testcpu.p & ~(F_N|F_Z));
-              if(v==0) testcpu.p|=F_Z;
-              if(v&0x80) testcpu.p|=F_N;
-          }
-          static void cpu_push(unsigned char v)
-          {
-              cpu_mem_write((unsigned short)(0x2100u|testcpu.s),v);
-              --testcpu.s;
-          }
-          static unsigned char cpu_pop(void)
-          {
-              ++testcpu.s;
-              return cpu_mem_read((unsigned short)(0x2100u|testcpu.s));
-          }
-          static void cpu_compare(unsigned char lhs,unsigned char rhs)
-          {
-              unsigned v=(unsigned)lhs-(unsigned)rhs;
-              testcpu.p=(unsigned char)(testcpu.p & ~F_C);
-              if(lhs>=rhs) testcpu.p|=F_C;
-              cpu_zn((unsigned char)v);
-          }
-          static void cpu_adc(unsigned char v)
-          {
-              unsigned a=testcpu.a,carry=(testcpu.p&F_C)?1u:0u;
-              unsigned result=a+v+carry;
-              /* Decimal mode and HuC6280 T-flag ALU are deliberately unsupported. */
-              testcpu.p=(unsigned char)(testcpu.p & ~(F_C|F_V));
-              if(result>255u) testcpu.p|=F_C;
-              if((~(a^v)&(a^result)&0x80u)!=0u) testcpu.p|=F_V;
-              testcpu.a=(unsigned char)result;
-              cpu_zn(testcpu.a);
-          }
-          static void cpu_sbc(unsigned char v)
-          {
-              unsigned a=testcpu.a,borrow=(testcpu.p&F_C)?0u:1u;
-              unsigned result=a-(unsigned)v-borrow;
-              testcpu.p=(unsigned char)(testcpu.p & ~(F_C|F_V));
-              if(result<256u) testcpu.p|=F_C;
-              if(((a^v)&(a^result)&0x80u)!=0u) testcpu.p|=F_V;
-              testcpu.a=(unsigned char)result;
-              cpu_zn(testcpu.a);
-          }
-          static void cpu_branch(int condition)
-          {
-              signed char delta=(signed char)cpu_fetch();
-              testcpu.cycles+=2;
-              if(condition) {
-                  testcpu.pc=(unsigned short)(testcpu.pc+(int)delta);
-                  ++testcpu.cycles;
-              }
-          }
-          static int cpu_single_step(void)
-          {
-              unsigned char op=cpu_fetch();
-              if(trace_enabled && trace_reason) return -1;
-              unsigned short addr;
-              unsigned char value,mask;
-              unsigned i;
-              cpu_last_opcode=op;
-          
-              /* Fail safely rather than approximate unsupported interrupt/I/O opcodes. */
-              switch(op) {
-              case 0xea: testcpu.cycles+=2; break; /* NOP */
-              case 0xa9: testcpu.a=cpu_fetch();cpu_zn(testcpu.a);testcpu.cycles+=2;break;
-              case 0xa2: testcpu.x=cpu_fetch();cpu_zn(testcpu.x);testcpu.cycles+=2;break;
-              case 0xa0: testcpu.y=cpu_fetch();cpu_zn(testcpu.y);testcpu.cycles+=2;break;
-              case 0xad: addr=cpu_fetch_word();testcpu.a=cpu_mem_read(addr);cpu_zn(testcpu.a);testcpu.cycles+=4;break;
-              case 0xae: addr=cpu_fetch_word();testcpu.x=cpu_mem_read(addr);cpu_zn(testcpu.x);testcpu.cycles+=4;break;
-              case 0xac: addr=cpu_fetch_word();testcpu.y=cpu_mem_read(addr);cpu_zn(testcpu.y);testcpu.cycles+=4;break;
-              case 0x8d: addr=cpu_fetch_word();cpu_mem_write(addr,testcpu.a);testcpu.cycles+=4;break;
-              case 0x8e: addr=cpu_fetch_word();cpu_mem_write(addr,testcpu.x);testcpu.cycles+=4;break;
-              case 0x8c: addr=cpu_fetch_word();cpu_mem_write(addr,testcpu.y);testcpu.cycles+=4;break;
-              case 0x85: value=cpu_fetch();cpu_mem_write((unsigned short)(0x2000u|value),testcpu.a);testcpu.cycles+=4;break;
-              case 0xa5: value=cpu_fetch();testcpu.a=cpu_mem_read((unsigned short)(0x2000u|value));cpu_zn(testcpu.a);testcpu.cycles+=4;break;
-              case 0xaa: testcpu.x=testcpu.a;cpu_zn(testcpu.x);testcpu.cycles+=2;break;
-              case 0x8a: testcpu.a=testcpu.x;cpu_zn(testcpu.a);testcpu.cycles+=2;break;
-              case 0xa8: testcpu.y=testcpu.a;cpu_zn(testcpu.y);testcpu.cycles+=2;break;
-              case 0x98: testcpu.a=testcpu.y;cpu_zn(testcpu.a);testcpu.cycles+=2;break;
-              case 0xe8: ++testcpu.x;cpu_zn(testcpu.x);testcpu.cycles+=2;break;
-              case 0xca: --testcpu.x;cpu_zn(testcpu.x);testcpu.cycles+=2;break;
-              case 0xc8: ++testcpu.y;cpu_zn(testcpu.y);testcpu.cycles+=2;break;
-              case 0x88: --testcpu.y;cpu_zn(testcpu.y);testcpu.cycles+=2;break;
-              case 0x18: testcpu.p=(unsigned char)(testcpu.p&~F_C);testcpu.cycles+=2;break;
-              case 0x38: testcpu.p|=F_C;testcpu.cycles+=2;break;
-              case 0x58: testcpu.p=(unsigned char)(testcpu.p&~F_I);testcpu.cycles+=2;break;
-              case 0x78: testcpu.p|=F_I;testcpu.cycles+=2;break;
-              case 0x69:
-                  if(trace_enabled && (testcpu.p&(F_D|0x20))) {
-                      trace_fail(TRACE_UNSUPPORTED_ALU,testcpu.pc,testcpu.mpr[testcpu.pc>>13]);
-                      return -1;
-                  }
-                  cpu_adc(cpu_fetch());testcpu.cycles+=2;break;
-              case 0xe9:
-                  if(trace_enabled && (testcpu.p&(F_D|0x20))) {
-                      trace_fail(TRACE_UNSUPPORTED_ALU,testcpu.pc,testcpu.mpr[testcpu.pc>>13]);
-                      return -1;
-                  }
-                  cpu_sbc(cpu_fetch());testcpu.cycles+=2;break;
-              case 0xc9: cpu_compare(testcpu.a,cpu_fetch());testcpu.cycles+=2;break;
-              case 0xe0: cpu_compare(testcpu.x,cpu_fetch());testcpu.cycles+=2;break;
-              case 0xc0: cpu_compare(testcpu.y,cpu_fetch());testcpu.cycles+=2;break;
-              case 0x48: cpu_push(testcpu.a);testcpu.cycles+=3;break;
-              case 0x68: testcpu.a=cpu_pop();cpu_zn(testcpu.a);testcpu.cycles+=4;break;
-              case 0x08: cpu_push((unsigned char)(testcpu.p|F_B));testcpu.cycles+=3;break;
-              case 0x28: testcpu.p=cpu_pop();testcpu.cycles+=4;break;
-              case 0x4c: testcpu.pc=cpu_fetch_word();testcpu.cycles+=3;break;
-              case 0x20:
-                  addr=cpu_fetch_word();
-                  value=(unsigned char)((testcpu.pc-1u)>>8);
-                  cpu_push(value);
-                  cpu_push((unsigned char)(testcpu.pc-1u));
-                  testcpu.pc=addr;
-                  testcpu.cycles+=6;
-                  break;
-              case 0x60:
-                  addr=cpu_pop();addr|=(unsigned short)((unsigned)cpu_pop()<<8);
-                  testcpu.pc=(unsigned short)(addr+1u);
-                  testcpu.cycles+=6;
-                  break;
-              case 0xd0: cpu_branch(!(testcpu.p&F_Z));break;
-              case 0xf0: cpu_branch( (testcpu.p&F_Z));break;
-              case 0x90: cpu_branch(!(testcpu.p&F_C));break;
-              case 0xb0: cpu_branch( (testcpu.p&F_C));break;
-              case 0x10: cpu_branch(!(testcpu.p&F_N));break;
-              case 0x30: cpu_branch( (testcpu.p&F_N));break;
-              case 0x53: /* HuC6280 TAM #mask: A to selected MPR registers */
-                  mask=cpu_fetch();
-                  for(i=0;i<8;i++) if(mask&(1u<<i)) testcpu.mpr[i]=testcpu.a;
-                  testcpu.cycles+=5;
-                  break;
-              case 0x43: /* HuC6280 TMA #mask: selected MPR to A */
-                  mask=cpu_fetch();
-                  if(!mask) {testcpu.error=0x143;return -1;}
-                  for(i=0;i<8;i++) if(mask&(1u<<i)) testcpu.a=testcpu.mpr[i];
-                  testcpu.cycles+=5;
-                  break;
-              default:
-                  testcpu.error=(int)op;
-                  trace_fail(TRACE_UNSUPPORTED,trace_last_pc,testcpu.mpr[trace_last_pc>>13]);
-                  return -1;
-              }
-              if(trace_enabled && trace_reason) return -1;
-              ++testcpu.steps;
-              return 0;
-          }
-          
-          static void cpu_test_setup(const unsigned char *program,unsigned length)
-          {
-              memset(&testcpu,0,sizeof(testcpu));
-              testcpu.pc=0x2100;
-              testcpu.s=0xff;
-              testcpu.p=F_I;
-              testcpu.mpr[1]=0xf8;
-              if(length<=sizeof(testcpu.ram)-0x100u)
-                  memcpy(&testcpu.ram[0x100],program,length);
-          }
-          static int cpu_test_run(int steps)
-          {
-              int i;
-              for(i=0;i<steps;i++) {
-                  if(cpu_single_step()<0) return 0;
-              }
-              return 1;
-          }
-          
-          static void cpu_run_selftest(void)
-          {
-              static const unsigned char basic[]={
-                  0xa9,0x2a,0xaa,0xe8,0x8e,0x00,0x22,0xad,0x00,0x22,0xea
-              };
-              static const unsigned char alu_stack[]={
-                  0xa9,0x05,0x18,0x69,0x07,0x48,0xa9,0x01,0x68,
-                  0x38,0xe9,0x02,0xc9,0x0a,0xd0,0x02,0xa2,0x00,
-                  0xe8,0xf0,0x02,0x8d,0x00,0x23,0xea
-              };
-              static const unsigned char subroutine[]={
-                  0xa2,0x00,0x20,0x10,0x21,0x8e,0x20,0x23,
-                  0x4c,0x18,0x21,0xea,0xea,0xea,0xea,0xea,
-                  0xe8,0xe8,0x60,0xea,0xea,0xea,0xea,0xea,0xea
-              };
-              static const unsigned char mpr_program[]={
-                  0xa9,0x05,0x53,0x08,0xa9,0x00,0x43,0x08,
-                  0x8d,0x30,0x22,0xa9,0xf8,0x53,0x01,
-                  0x43,0x08,0xea
-              };
-              static const unsigned char branch_loop[]={
-                  0xa2,0x00,0xe8,0xe0,0x03,0xd0,0xfb,
-                  0x8e,0x40,0x22,0xea
-              };
-              cpu_tests_passed=0;
-              cpu_test_result=0;
-              cpu_failed_test=0;
-              cpu_test_steps=0;
-              cpu_test_cycles=0;
-          
-              cpu_test_setup(basic,sizeof(basic));
-              if(!cpu_test_run(6) || testcpu.pc!=0x210b ||
-                 testcpu.a!=0x2b || testcpu.x!=0x2b ||
-                 testcpu.ram[0x200]!=0x2b || testcpu.cycles!=16) goto fail;
-              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
-              ++cpu_tests_passed;
-          
-              cpu_test_setup(alu_stack,sizeof(alu_stack));
-              if(!cpu_test_run(15) || testcpu.pc!=0x2119 ||
-                 testcpu.a!=0x0a || testcpu.x!=1 ||
-                 testcpu.ram[0x300]!=0x0a || testcpu.ram[0x1ff]!=0x0c ||
-                 testcpu.s!=0xff || testcpu.cycles!=35) goto fail;
-              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
-              ++cpu_tests_passed;
-          
-              cpu_test_setup(subroutine,sizeof(subroutine));
-              if(!cpu_test_run(8) || testcpu.pc!=0x2119 ||
-                 testcpu.x!=2 || testcpu.ram[0x320]!=2 || testcpu.s!=0xff) goto fail;
-              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
-              ++cpu_tests_passed;
-          
-              cpu_test_setup(mpr_program,sizeof(mpr_program));
-              if(!cpu_test_run(9) || testcpu.pc!=0x2112 ||
-                 testcpu.a!=5 || testcpu.mpr[3]!=5 || testcpu.mpr[0]!=0xf8 ||
-                 testcpu.ram[0x230]!=5) goto fail;
-              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
-              ++cpu_tests_passed;
-          
-              cpu_test_setup(branch_loop,sizeof(branch_loop));
-              if(!cpu_test_run(12) || testcpu.pc!=0x210b ||
-                 testcpu.x!=3 || testcpu.ram[0x240]!=3) goto fail;
-              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
-              ++cpu_tests_passed;
-              cpu_test_result=1;
-              return;
-          fail:
-              cpu_failed_test=cpu_tests_passed+1;
-              cpu_test_result=-cpu_failed_test;
-          }
-          
-          
-          /* Execute a bounded trace FROM THE REAL ROM RESET VECTOR, not synthetic RAM.
-           * We intentionally stop rather than invent VDC/VCE/PSG/IRQ behaviour.
-           * Tests do not mutate the USB device; the ROM is already in PS2 RAM.
-           */
-          static void trace_run_rom(void)
-          {
-              int n,rc;
-              trace_enabled=0;
-              trace_reason=0;
-              trace_last_pc=0;
-              trace_last_op=0;
-              trace_address=0;
-              trace_bank=0;
-              trace_history_count=0;
-              trace_limit_used=0;
-              memset(&testcpu,0,sizeof(testcpu));
-              if(!loaded || !mapping_ok || !rom) {
-                  trace_reason=TRACE_NO_ROM;
-                  return;
-              }
-              testcpu.pc=(unsigned short)vector_pc;
-              testcpu.s=0xff;
-              testcpu.p=F_I;
-              testcpu.mpr[7]=0;
-              /* Hardware leaves MPR0..6 undefined at reset; 00 is a probe assumption. */
-              trace_enabled=1;
-              for(n=0;n<TRACE_MAX_STEPS;n++) {
-                  unsigned short here=testcpu.pc;
-                  unsigned char opcode=cpu_mem_read(here);
-                  if(trace_reason) break;
-                  trace_last_pc=here;
-                  trace_last_op=opcode;
-                  trace_history_pc[trace_history_count%8]=here;
-                  trace_history_op[trace_history_count%8]=opcode;
-                  ++trace_history_count;
-                  rc=cpu_single_step();
-                  if(trace_reason) break;
-                  if(rc<0) {
-                      trace_fail(TRACE_UNSUPPORTED,here,testcpu.mpr[here>>13]);
-                      break;
-                  }
-              }
-              if(!trace_reason) {
-                  trace_reason=TRACE_STEP_LIMIT;
-                  trace_limit_used=1;
-              }
-              trace_enabled=0;
-          }
-          
-          static void select_file(void)
-          {
-              int n;
-              if(count<=0||selected>=count)return;
-              n=snprintf(full_path,sizeof(full_path),"%s%s%s",current_path,
-                         items[selected].name,items[selected].directory?"/":"");
-              if(n<0||n>=(int)sizeof(full_path)){listing_error=-120;return;}
-              if(items[selected].directory){strcpy(current_path,full_path);list_dir();}
-              else {size_rom=0;error_rom=0;read_rom=0;rom_free();screen=2;}
-          }
-          static void compact(char *out,int len,const char *src)
-          {
-              int i;
-              for(i=0;i<len-1 && src[i];i++) {
-                  unsigned char x=(unsigned char)src[i];
-                  out[i]=(x>=32 && x<127)?(char)toupper(x):'_';
-              }
-              out[i]=0;
-          }
-          static void draw(GSGLOBAL *gs)
-          {
-              u64 bg=GS_SETREG_RGBAQ(12,20,35,0x80,0);
-              u64 panel=GS_SETREG_RGBAQ(29,46,63,0x80,0);
-              u64 cyan=GS_SETREG_RGBAQ(56,218,186,0x80,0);
-              u64 white=GS_SETREG_RGBAQ(236,243,249,0x80,0);
-              u64 muted=GS_SETREG_RGBAQ(156,179,195,0x80,0);
-              char line[100],name[40];
-              int i,first;
-              gsKit_clear(gs,bg);
-              gsKit_prim_sprite(gs,42,35,51,128,1,cyan);
-              text5(gs,67,52,3,"BEETLE PCE FAST",white);
-              text5(gs,69,100,2,"PS2 EXFAT ROM TRACE V10",cyan);
-              if(screen==0) {
-                  gsKit_prim_sprite(gs,57,174,585,221,1,panel);
-                  text5(gs,80,185,3,"BROWSE USB ROMS",white);
-                  text5(gs,80,255,2,"X OPEN BROWSER",cyan);
-                  if(usb_error<0){snprintf(line,sizeof(line),"USB ERROR %d",usb_error);text5(gs,80,312,2,line,white);}
-              } else if(screen==1) {
-                  compact(name,sizeof(name),current_path);
-                  text5(gs,53,144,2,name,cyan);
-                  first=selected-VISIBLE/2;
-                  if(first<0)first=0;
-                  if(first+VISIBLE>count)first=count-VISIBLE;
-                  if(first<0)first=0;
-                  for(i=0;i<VISIBLE && first+i<count;i++) {
-                      int at=first+i,y=179+i*25;
-                      compact(name,25,items[at].name);
-                      snprintf(line,sizeof(line),"%s %s",items[at].directory?"D":"R",name);
-                      if(at==selected) {
-                          gsKit_prim_sprite(gs,52,y-3,595,y+22,1,panel);
-                          gsKit_prim_sprite(gs,52,y-3,57,y+22,1,cyan);
-                      }
-                      text5(gs,66,y,2,line,at==selected?white:muted);
-                  }
-                  if(count==0)text5(gs,72,200,2,"NO ROMS OR FOLDERS",white);
-                  snprintf(line,sizeof(line),"ITEMS %d HIDDEN %d",count,hidden);
-                  text5(gs,55,395,2,line,cyan);
-                  text5(gs,55,420,2,"UP DOWN X OPEN O BACK",cyan);
-              } else if(screen==2) {
-                  const char *nameptr=strrchr(full_path,'/');
-                  compact(name,sizeof(name),nameptr?nameptr+1:full_path);
-                  text5(gs,66,149,3,"ROM BOOT PROBE V10",white);
-                  text5(gs,65,199,2,name,cyan);
-                  snprintf(line,sizeof(line),"SIZE %d READ %d",size_rom,read_rom);
-                  text5(gs,65,232,2,line,white);
-                  snprintf(line,sizeof(line),"BLOCKS %d POS %d",blocks,last_pos);
-                  text5(gs,65,259,2,line,white);
-                  snprintf(line,sizeof(line),"CRC32 %08X",disk_crc);
-                  text5(gs,65,286,2,line,cyan);
-                  if(loaded) {
-                      snprintf(line,sizeof(line),"BANKS %d HEADER %d",bank_count,header_skip);
-                      text5(gs,65,312,2,line,white);
-                      snprintf(line,sizeof(line),"MPR7 00 RESET %04X",vector_pc);
-                      text5(gs,65,337,2,line,white);
-                      snprintf(line,sizeof(line),"FIRST OPCODE %02X",vector_opcode);
-                      text5(gs,65,362,2,line,cyan);
-                      text5(gs,65,388,2,"ROM IN RAM MAP READY",cyan);
-                  } else if(error_rom) {
-                      snprintf(line,sizeof(line),"LOAD ERROR %d",error_rom);
-                      text5(gs,65,350,2,line,white);
-                  } else text5(gs,65,350,2,"PRESS X TO LOAD ROM",cyan);
-                  text5(gs,65,413,2,"X LOAD TRI CPU SQR TRACE O BACK",muted);
-              } else if(screen==3) {
-                  text5(gs,64,151,3,"HUC6280 CPU TEST V10",white);
-                  text5(gs,65,200,2,"SAFE RAM PROGRAMS ONLY",cyan);
-                  snprintf(line,sizeof(line),"TESTS %d / %d PASS",cpu_tests_passed,V9_TESTS);
-                  text5(gs,65,235,2,line,white);
-                  snprintf(line,sizeof(line),"PC %04X STEPS %d",testcpu.pc,cpu_test_steps);
-                  text5(gs,65,262,2,line,white);
-                  snprintf(line,sizeof(line),"A %02X X %02X Y %02X P %02X",testcpu.a,testcpu.x,testcpu.y,testcpu.p);
-                  text5(gs,65,289,2,line,white);
-                  snprintf(line,sizeof(line),"MPR0 %02X MPR3 %02X CYC %d",testcpu.mpr[0],testcpu.mpr[3],cpu_test_cycles);
-                  text5(gs,65,316,2,line,white);
-                  if(cpu_test_result==1) text5(gs,65,353,2,"CPU TESTS PASS",cyan);
-                  else {
-                      snprintf(line,sizeof(line),"FAIL TEST %d OPC %02X",cpu_failed_test,cpu_last_opcode);
-                      text5(gs,65,353,2,line,white);
-                  }
-                  text5(gs,65,388,2,"X RETEST O ROM VIEW",muted);
-              } else if(screen==4) {
-                  int last=trace_history_count-1;
-                  text5(gs,65,149,3,"REAL ROM TRACE V10",white);
-                  text5(gs,65,191,2,"NO VIDEO OR AUDIO EMULATION",muted);
-                  snprintf(line,sizeof(line),"RESET %04X MPR7 00",vector_pc);
-                  text5(gs,65,219,2,line,cyan);
-                  snprintf(line,sizeof(line),"STEPS %d CYC %d",testcpu.steps,testcpu.cycles);
-                  text5(gs,65,245,2,line,white);
-                  text5(gs,65,271,2,trace_reason_text(trace_reason),cyan);
-                  snprintf(line,sizeof(line),"PC %04X OP %02X",trace_last_pc,trace_last_op);
-                  text5(gs,65,297,2,line,white);
-                  snprintf(line,sizeof(line),"MPR1 %02X MPR2 %02X MPR7 %02X",
-                           testcpu.mpr[1],testcpu.mpr[2],testcpu.mpr[7]);
-                  text5(gs,65,323,2,line,white);
-                  snprintf(line,sizeof(line),"ADDR %04X BANK %02X",trace_address,trace_bank);
-                  text5(gs,65,349,2,line,white);
-                  if(last>=0) {
-                      int ix=last%8;
-                      snprintf(line,sizeof(line),"LAST %04X %02X",trace_history_pc[ix],trace_history_op[ix]);
-                      text5(gs,65,375,2,line,cyan);
-                  }
-                  text5(gs,65,410,2,"X RETEST O BACK",muted);
-              }
-          }
-          int main(int argc,char **argv)
-          {
-              GSGLOBAL *gs;
-              unsigned buttons;
-              (void)argc;(void)argv;
-              gs=gsKit_init_global();
-              if(!gs)return 1;
-              gs->PSM=GS_PSM_CT16;
-              gs->PSMZ=GS_PSMZ_16;
-              gs->ZBuffering=GS_SETTING_OFF;
-              dmaKit_init(D_CTRL_RELE_OFF,D_CTRL_MFD_OFF,D_CTRL_STS_UNSPEC,
-                          D_CTRL_STD_OFF,D_CTRL_RCYC_8,1<<DMA_CHANNEL_GIF);
-              dmaKit_chan_init(DMA_CHANNEL_GIF);
-              gsKit_init_screen(gs);
-              gsKit_mode_switch(gs,GS_ONESHOT);
-              pad_start();
-              for(;;) {
-                  buttons=keys_new();
-                  if(screen==0 && (buttons & PAD_CROSS)) {
-                      if(!usb_ok) {
-                          draw(gs);gsKit_queue_exec(gs);gsKit_sync_flip(gs);
-                          usb_error=usb_start();
-                      }
-                      if(usb_error==0) {
-                          strcpy(current_path,"mass:/");
-                          if(list_dir()<0) {
-                              strcpy(current_path,"mass0:/");
-                              if(list_dir()>=0)screen=1;
-                          } else screen=1;
-                      }
-                  } else if(screen==1) {
-                      if((buttons & PAD_UP)&&count>0)selected=(selected+count-1)%count;
-                      if((buttons & PAD_DOWN)&&count>0)selected=(selected+1)%count;
-                      if(buttons & PAD_CROSS)select_file();
-                      if(buttons & (PAD_CIRCLE|PAD_TRIANGLE))up_dir();
-                      if(buttons & PAD_SQUARE)list_dir();
-                  } else if(screen==2) {
-                      if(buttons & PAD_CROSS) {
-                          draw(gs);gsKit_queue_exec(gs);gsKit_sync_flip(gs);
-                          rom_load();
-                      }
-                      if((buttons & PAD_TRIANGLE) && loaded && mapping_ok) {
-                          cpu_run_selftest();
-                          screen=3;
-                      }
-                      if((buttons & PAD_SQUARE) && loaded && mapping_ok) {
-                          trace_run_rom();
-                          screen=4;
-                      }
-                      if(buttons & PAD_CIRCLE) {rom_free();screen=1;}
-                  } else if(screen==3) {
-                      if(buttons & PAD_CROSS) cpu_run_selftest();
-                      if(buttons & (PAD_CIRCLE|PAD_TRIANGLE)) screen=2;
-                  } else if(screen==4) {
-                      if(buttons & PAD_CROSS) trace_run_rom();
-                      if(buttons & (PAD_CIRCLE|PAD_TRIANGLE)) screen=2;
-                  }
-                  draw(gs);gsKit_queue_exec(gs);gsKit_sync_flip(gs);
-              }
-          }
-          END_V10_C
-          cat > ps2-v10/Makefile <<'END_V10_MAKE'
-          EE_BIN = Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10.ELF
+          # Complete V11 C source embedded as gzip + base64.
+          base64 -d <<'V11_SOURCE_B64' | gzip -dc > ps2-v11/app.c
+          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
+          V11_SOURCE_B64
+          echo 'd795bea19ecb5d187132723772641937c90bd2a3a1c10f4f2639ffd59ae6d4c2  ps2-v11/app.c' | sha256sum -c -
+          grep -q 'V11_TESTS 6' ps2-v11/app.c
+          cat > ps2-v11/Makefile <<'V11_MAKEFILE'
+          EE_BIN = Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11.ELF
           EE_OBJS = app.o exfat_bdm.o exfat_usb.o iomanx.o filexio.o
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
           EE_INCS += -I$(GSKIT)/include
@@ -917,28 +202,24 @@ jobs:
           	rm -f $(EE_BIN) $(EE_OBJS)
           include $(PS2SDK)/samples/Makefile.pref
           include $(PS2SDK)/samples/Makefile.eeglobal
-          END_V10_MAKE
-          test -s ps2-v10/app.c
-          test -s ps2-v10/Makefile
-          grep -q 'TRACE_MAX_STEPS 96' ps2-v10/app.c
-          grep -q 'V9_TESTS 5' ps2-v10/app.c
+          V11_MAKEFILE
 
       - name: Embed PS2 drivers
         shell: sh
         run: |
           set -eu
-          cd ps2-v10
+          cd ps2-v11
           bin2c usbd.irx exfat_bdm.c exfat_bdm_irx
           bin2c usbhdfsd.irx exfat_usb.c exfat_usb_irx
           bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
           bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
 
-      - name: Compile PS2 V10 ELF
-        working-directory: ps2-v10
+      - name: Compile PS2 V11 ELF
+        working-directory: ps2-v11
         shell: sh
         run: |
           if make -j2 > build.log 2>&1; then
-            ls -lh Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10.ELF
+            ls -lh Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11.ELF
           else
             grep -n -m 40 -E 'error:|undefined reference|No such file|cannot find' build.log || true
             tail -n 130 build.log
@@ -946,13 +227,13 @@ jobs:
           fi
 
       - name: Check executable MIPS ELF
-        working-directory: ps2-v10
+        working-directory: ps2-v11
         shell: sh
         run: |
           python3 - <<'PY'
           import struct
           from pathlib import Path
-          p=Path('Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10.ELF')
+          p=Path('Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11.ELF')
           h=p.read_bytes()[:20]
           assert h[:4]==b'\x7fELF', 'ELF header missing'
           assert h[4:6]==bytes((1,1)), 'Must be 32-bit little-endian'
@@ -964,14 +245,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-V10-build-log
-          path: ps2-v10/build.log
+          name: Beetle-V11-build-log
+          path: ps2-v11/build.log
           if-no-files-found: warn
 
-      - name: Upload PS2 V10 ELF
+      - name: Upload PS2 V11 ELF
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10
-          path: ps2-v10/Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10.ELF
+          name: Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11
+          path: ps2-v11/Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11.ELF
           if-no-files-found: error
