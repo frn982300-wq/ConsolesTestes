@@ -1,5 +1,4 @@
-
-name: Beetle PCE Fast PS2 exFAT Speed Mode ROM Trace V11
+name: PCE Fast PS2 Standalone Experimental
 
 on:
   push:
@@ -11,248 +10,553 @@ permissions:
 
 jobs:
   build:
-    name: Build V11 CPU clock mode and ROM trace
+    name: Build single-core Beetle PCE Fast ELF
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     container:
       image: ps2dev/ps2dev:latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow repository
         uses: actions/checkout@v4
 
-      - name: Install build tools
-        run: |
-          set -eu
-          apk add --no-cache make build-base python3 unzip
-
-      - name: Extract working exFAT drivers
+      - name: Install tools
         shell: sh
         run: |
           set -eu
-          mkdir -p ps2-v11
+          apk add --no-cache git make python3 build-base unzip binutils
+
+      - name: Fetch tested PS2 PCE Fast integration
+        shell: sh
+        run: |
+          set -eu
+          git clone --depth 1 https://github.com/itsveenee/SNESticleAurora.git aurora
+          git -C aurora submodule update --init --depth 1 src/third_party/beetle-pce-fast
+          test -s aurora/Makefile
+          test -s aurora/tools/Makefile.beetle-pce-fast-ps2
+          test -s aurora/src/third_party/beetle-pce-fast/libretro.c
+          git -C aurora rev-parse HEAD > aurora-revision.txt
+
+      - name: Build ONLY the original PC Engine core archive
+        shell: sh
+        run: |
+          set -eu
+          BASE="$(pwd)/aurora"
+          TARGET="$BASE/build/pce/beetle_pce_fast_libretro_ps2.a"
+          echo "Building PCE library: $TARGET"
+          if make -C aurora -j2 "$TARGET" > core-build.log 2>&1; then
+            echo 'Original Aurora PCE core build completed.'
+          else
+            echo 'Failed to build the isolated Aurora PCE core.'
+            tail -n 150 core-build.log
+            exit 1
+          fi
+          RAW="$BASE/build/beetle-pce-fast-src/mednafen_pce_fast_libretro_ps2_raw.a"
+          test -s "$RAW" || { echo 'Raw PCE archive was not produced'; exit 1; }
+          mips64r5900el-ps2-elf-nm -g --defined-only "$RAW" > pce-symbols.txt
+          grep -Eq '[[:space:]]retro_run$' pce-symbols.txt || {
+            echo 'Raw archive does not export the expected Libretro API.'
+            exit 1
+          }
+          echo 'Verified: native Beetle PCE Fast retro_run function.'
+
+      - name: Prepare working exFAT USB modules
+        shell: sh
+        run: |
+          set -eu
           test -s FCEUmm-PS2-exFAT-integrated-2026.zip
+          mkdir -p pce-only
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
-            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx \
-            > ps2-v11/usbd.irx
+            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx > pce-only/usbd.irx
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
-            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx \
-            > ps2-v11/usbhdfsd.irx
-          test -s ps2-v11/usbd.irx
-          test -s ps2-v11/usbhdfsd.irx
+            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx > pce-only/usbhdfsd.irx
+          test -s pce-only/usbd.irx
+          test -s pce-only/usbhdfsd.irx
           test -s "$PS2SDK/iop/irx/iomanX.irx"
           test -s "$PS2SDK/iop/irx/fileXio.irx"
-          command -v bin2c
 
-      - name: Restore full embedded V11 source
+      - name: Generate PS2-only Libretro frontend
         shell: sh
         run: |
           set -eu
-          # Complete V11 C source embedded as gzip + base64.
-          base64 -d <<'V11_SOURCE_B64' | gzip -dc > ps2-v11/app.c
-          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
-          V11_SOURCE_B64
-          echo 'd795bea19ecb5d187132723772641937c90bd2a3a1c10f4f2639ffd59ae6d4c2  ps2-v11/app.c' | sha256sum -c -
-          grep -q 'V11_TESTS 6' ps2-v11/app.c
-          cat > ps2-v11/Makefile <<'V11_MAKEFILE'
-          EE_BIN = Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11.ELF
-          EE_OBJS = app.o exfat_bdm.o exfat_usb.o iomanx.o filexio.o
+          mkdir -p pce-only
+          cat > pce-only/pce_only.c <<'PCE_FRONTEND_C'
+          /*
+           * PCE Fast PS2 - experimental single-core Libretro frontend.
+           * Based on the Beetle PCE Fast libretro core used by SNESticle Aurora.
+           * This frontend is new; the core is built from its original source.
+           * No ROM or firmware is bundled. Video/input and read-only exFAT first.
+           */
+          #include <gsKit.h>
+          #include <dmaKit.h>
+          #include <libpad.h>
+          #include <sifrpc.h>
+          #include <loadfile.h>
+          #include <sbv_patches.h>
+          #include <iopheap.h>
+          #include <fileXio_rpc.h>
+          #include <io_common.h>
+          #include <iox_stat.h>
+          #include <libretro.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <ctype.h>
+          #include <stdint.h>
+          
+          #define MAX_FILES 128
+          #define MAX_PATH 512
+          #define ROM_LIMIT (8u * 1024u * 1024u)
+          #define TEX_SIZE 512
+          
+          extern unsigned char bdm_irx[], usb_irx[], iomanx_irx[], filexio_irx[];
+          extern unsigned int size_bdm_irx, size_usb_irx, size_iomanx_irx, size_filexio_irx;
+          
+          typedef struct { char name[256]; int dir; } Entry;
+          static Entry entries[MAX_FILES];
+          static int nentries, selected, screen, status_code;
+          static char folder[MAX_PATH] = "mass:/";
+          static char game_path[MAX_PATH];
+          static unsigned char *game_data;
+          static size_t game_size;
+          static char pad_buf[256] __attribute__((aligned(64)));
+          static struct padButtonStatus pad_info;
+          static unsigned int buttons_now, buttons_prev, buttons_edge;
+          static iox_dirent_t dirent_buf __attribute__((aligned(64)));
+          static iox_stat_t stat_buf __attribute__((aligned(64)));
+          static unsigned char readbuf[16384] __attribute__((aligned(64)));
+          static uint32_t pixels[TEX_SIZE * TEX_SIZE] __attribute__((aligned(64)));
+          static GSTEXTURE tex;
+          static GSGLOBAL *gs;
+          static int video_received, pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
+          static unsigned frame_w = 256, frame_h = 224;
+          static int core_initialized, core_loaded;
+          static int usb_initialized;
+          
+          static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:._()";
+          static const unsigned long long glyphs[] = {
+            0x4631fc62eULL,0x3e317c62fULL,0x78210843eULL,0x3e318c62fULL,0x7c217843fULL,
+            0x04217843fULL,0x3a31e843eULL,0x4631fc631ULL,0x7c842109fULL,0x19294211cULL,
+            0x452519531ULL,0x7c2108421ULL,0x4631ad771ULL,0x4631cd671ULL,0x3a318c62eULL,
+            0x04217c62fULL,0x59358c62eULL,0x45257c62fULL,0x3e107043eULL,0x10842109fULL,
+            0x3a318c631ULL,0x11518c631ULL,0x4775ac631ULL,0x462a22a31ULL,0x108422a31ULL,
+            0x7c222221fULL,0x3a33ae62eULL,0x3884210c4ULL,0x7c444422eULL,0x3e107420fULL,
+            0x211f4a988ULL,0x3e107843fULL,0x3a317842eULL,0x08422221fULL,0x3a317462eULL,
+            0x3a10f462eULL,0x0000f8000ULL,0x042222210ULL,0x008401080ULL,0x18c000000ULL,
+            0x000000000ULL,0x000000000ULL,0x000000000ULL,0x000000000ULL
+          };
+          static void label(int x,int y,int scale,const char *s,uint64_t color) {
+            int i,r,c,j;
+            for(i=0;s[i];i++) {
+              char ch=(char)toupper((unsigned char)s[i]);
+              unsigned long long bits=0;
+              for(j=0;chars[j];j++) if(chars[j]==ch) {bits=glyphs[j];break;}
+              for(r=0;r<7;r++) for(c=0;c<5;c++) if(bits&(1ULL << (r*5+c))) {
+                float xx=(float)(x+(i*6+c)*scale), yy=(float)(y+r*scale);
+                gsKit_prim_sprite(gs,xx,yy,xx+scale,yy+scale,1,color);
+              }
+            }
+          }
+          static void title_screen(const char *subtitle) {
+            uint64_t bg=GS_SETREG_RGBAQ(12,20,35,0x80,0);
+            uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
+            uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
+            gsKit_clear(gs,bg);
+            label(45,48,3,"PCE FAST PS2",white);
+            label(45,99,2,subtitle,aqua);
+          }
+          static void refresh_screen(void) { gsKit_queue_exec(gs); gsKit_sync_flip(gs); }
+          static void pad_scan(void) {
+            int s=padGetState(0,0);
+            buttons_prev=buttons_now;
+            if((s!=PAD_STATE_STABLE && s!=PAD_STATE_FINDCTP1) ||
+               !padRead(0,0,&pad_info)) {buttons_now=0;buttons_edge=0;return;}
+            buttons_now=0xffffu^(unsigned int)pad_info.btns;
+            buttons_edge=buttons_now & ~buttons_prev;
+          }
+          static int load_mod(void *address,unsigned int len) {
+            int result=0, id=SifExecModuleBuffer(address,len,0,NULL,&result);
+            return (id<0)?id:((result<0)?result:0);
+          }
+          static int usb_init(void) {
+            int r;
+            if(usb_initialized)return 0;
+            SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb();
+            r=load_mod(iomanx_irx,size_iomanx_irx); if(r<0)return r;
+            r=load_mod(filexio_irx,size_filexio_irx); if(r<0)return r;
+            r=fileXioInit(); if(r<0)return r;
+            r=load_mod(bdm_irx,size_bdm_irx); if(r<0)return r;
+            r=load_mod(usb_irx,size_usb_irx); if(r<0)return r;
+            usb_initialized=1;
+            return 0;
+          }
+          static int is_pce(const char *name) {
+            const char *dot=strrchr(name,'.');
+            return dot && dot[1] && dot[2] && dot[3] && !dot[4] &&
+              tolower((unsigned char)dot[1])=='p' &&
+              tolower((unsigned char)dot[2])=='c' &&
+              tolower((unsigned char)dot[3])=='e';
+          }
+          static int cmp_entry(const void *pa,const void *pb) {
+            const Entry *a=(const Entry *)pa,*b=(const Entry *)pb;
+            if(a->dir != b->dir) return b->dir-a->dir;
+            {
+              int i;
+              for(i=0;i<256;i++) {
+                int ca=tolower((unsigned char)a->name[i]);
+                int cb=tolower((unsigned char)b->name[i]);
+                if(ca!=cb)return ca-cb;
+                if(!ca)return 0;
+              }
+              return 0;
+            }
+          }
+          static int scan_dir(void) {
+            int d=fileXioDopen(folder),r;
+            nentries=0; selected=0;
+            if(d<0) return d;
+            for(;;) {
+              memset(&dirent_buf,0,sizeof(dirent_buf));
+              r=fileXioDread(d,&dirent_buf);
+              if(r<=0)break;
+              dirent_buf.name[sizeof(dirent_buf.name)-1]=0;
+              if(!strcmp(dirent_buf.name,".")||!strcmp(dirent_buf.name,".."))continue;
+              if(!FIO_S_ISDIR(dirent_buf.stat.mode) && !is_pce(dirent_buf.name))continue;
+              if(nentries>=MAX_FILES)continue;
+              strncpy(entries[nentries].name,dirent_buf.name,sizeof(entries[0].name)-1);
+              entries[nentries].name[sizeof(entries[0].name)-1]=0;
+              entries[nentries].dir=FIO_S_ISDIR(dirent_buf.stat.mode)?1:0;
+              ++nentries;
+            }
+            fileXioDclose(d);
+            qsort(entries,nentries,sizeof(entries[0]),cmp_entry);
+            return r<0?r:0;
+          }
+          static void enter_parent(void) {
+            size_t n=strlen(folder), root=!strncmp(folder,"mass0:/",7)?7:6;
+            if(n<=root) {screen=0;return;}
+            if(folder[n-1]=='/')--n;
+            while(n>root&&folder[n-1]!='/')--n;
+            folder[n]=0;
+            status_code=scan_dir();
+          }
+          static void render_browser(void) {
+            int first=selected-5,i;
+            uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
+            uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
+            char tmp[40],msg[80];
+            title_screen("USB EXFAT BROWSER");
+            strncpy(tmp,folder,sizeof(tmp)-1);tmp[sizeof(tmp)-1]=0;
+            label(45,145,2,tmp,aqua);
+            if(first<0)first=0;
+            if(first+9>nentries) first=nentries-9;
+            if(first<0)first=0;
+            for(i=first;i<nentries && i<first+9;i++) {
+              snprintf(msg,sizeof(msg),"%c %.*s",entries[i].dir?'D':'R',26,entries[i].name);
+              label(50,184+(i-first)*25,2,msg,i==selected?aqua:white);
+            }
+            if(nentries==0)label(50,210,2,"NO PCE FILES",white);
+            label(44,415,2,"UP DOWN X OPEN O BACK",aqua);
+          }
+          static void unload_game(void) {
+            if(core_loaded) {retro_unload_game();core_loaded=0;}
+            if(game_data) {free(game_data);game_data=NULL;}
+            game_size=0;
+            video_received=0;
+          }
+          static int read_full_game(const char *path) {
+            int fd,n,seek=0;
+            size_t off=0, sz;
+            memset(&stat_buf,0,sizeof(stat_buf));
+            n=fileXioGetStat(path,&stat_buf);
+            if(n<0)return n;
+            if(stat_buf.hisize || !stat_buf.size || stat_buf.size>ROM_LIMIT)return -100;
+            sz=(size_t)stat_buf.size;
+            game_data=(unsigned char *)malloc(sz);
+            if(!game_data)return -101;
+            fd=fileXioOpen(path,FIO_O_RDONLY);
+            if(fd<0){unload_game();return fd;}
+            seek=fileXioLseek(fd,0,FIO_SEEK_SET);
+            if(seek!=0){fileXioClose(fd);unload_game();return -102;}
+            while(off<sz) {
+              int want=(int)(sz-off);
+              if(want>(int)sizeof(readbuf))want=(int)sizeof(readbuf);
+              n=fileXioRead(fd,readbuf,want);
+              if(n<=0 || n>want) {fileXioClose(fd);unload_game();return n<0?n:-103;}
+              memcpy(game_data+off,readbuf,(size_t)n);
+              off+=(size_t)n;
+            }
+            n=fileXioClose(fd);
+            if(n<0){unload_game();return n;}
+            game_size=sz;
+            return 0;
+          }
+          static bool core_environment(unsigned command,void *data) {
+            switch(command) {
+              case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
+                pixel_format=*(const enum retro_pixel_format *)data;
+                return pixel_format==RETRO_PIXEL_FORMAT_RGB565 ||
+                       pixel_format==RETRO_PIXEL_FORMAT_XRGB8888 ||
+                       pixel_format==RETRO_PIXEL_FORMAT_0RGB1555;
+              case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
+                *(const char **)data="mass:/SYSTEM";return true;
+              case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
+                *(const char **)data="mass:/SAVES";return true;
+              case RETRO_ENVIRONMENT_GET_CAN_DUPE:
+                *(bool *)data=true;return true;
+              case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
+                *(bool *)data=false;return true;
+              case RETRO_ENVIRONMENT_GET_VARIABLE:
+                return false; /* Let the core use its defaults. */
+              case RETRO_ENVIRONMENT_SET_VARIABLES:
+              case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
+              case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
+                return true;
+          #ifdef RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE
+              case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE:
+                *(int *)data=1;return true; /* Video only for initial port. */
+          #endif
+              default:return false;
+            }
+          }
+          static void video_cb(const void *data,unsigned width,unsigned height,size_t pitch) {
+            unsigned x,y;
+            if(!data || width==0 || height==0 || width>TEX_SIZE || height>TEX_SIZE)return;
+            frame_w=width;frame_h=height;
+            for(y=0;y<height;y++) {
+              const uint8_t *row=(const uint8_t *)data+y*pitch;
+              for(x=0;x<width;x++) {
+                unsigned r,g,b;
+                if(pixel_format==RETRO_PIXEL_FORMAT_XRGB8888) {
+                  unsigned p=((const uint32_t *)row)[x];
+                  r=(p>>16)&255u;g=(p>>8)&255u;b=p&255u;
+                } else if(pixel_format==RETRO_PIXEL_FORMAT_RGB565) {
+                  unsigned p=((const uint16_t *)row)[x];
+                  r=((p>>11)&31u)*255u/31u;
+                  g=((p>>5)&63u)*255u/63u;
+                  b=(p&31u)*255u/31u;
+                } else {
+                  unsigned p=((const uint16_t *)row)[x];
+                  r=((p>>10)&31u)*255u/31u;
+                  g=((p>>5)&31u)*255u/31u;
+                  b=(p&31u)*255u/31u;
+                }
+                pixels[y*TEX_SIZE+x]=0x80000000u|(b<<16)|(g<<8)|r;
+              }
+            }
+            video_received=1;
+          }
+          static void audio_one(int16_t left,int16_t right) {(void)left;(void)right;}
+          static size_t audio_many(const int16_t *samples,size_t frames) {(void)samples;return frames;}
+          static void input_poll(void) { /* pad_scan is called by the main loop */ }
+          static int16_t input_state(unsigned port,unsigned device,unsigned index,unsigned id) {
+            (void)index;
+            if(port!=0 || device!=RETRO_DEVICE_JOYPAD)return 0;
+            switch(id) {
+              case RETRO_DEVICE_ID_JOYPAD_UP:return !!(buttons_now&PAD_UP);
+              case RETRO_DEVICE_ID_JOYPAD_DOWN:return !!(buttons_now&PAD_DOWN);
+              case RETRO_DEVICE_ID_JOYPAD_LEFT:return !!(buttons_now&PAD_LEFT);
+              case RETRO_DEVICE_ID_JOYPAD_RIGHT:return !!(buttons_now&PAD_RIGHT);
+              case RETRO_DEVICE_ID_JOYPAD_B:return !!(buttons_now&PAD_CROSS);
+              case RETRO_DEVICE_ID_JOYPAD_A:return !!(buttons_now&PAD_CIRCLE);
+              case RETRO_DEVICE_ID_JOYPAD_START:return !!(buttons_now&PAD_START);
+              case RETRO_DEVICE_ID_JOYPAD_SELECT:return !!(buttons_now&PAD_SELECT);
+              case RETRO_DEVICE_ID_JOYPAD_X:return !!(buttons_now&PAD_SQUARE);
+              case RETRO_DEVICE_ID_JOYPAD_Y:return !!(buttons_now&PAD_TRIANGLE);
+              default:return 0;
+            }
+          }
+          static int begin_game(const char *path) {
+            struct retro_game_info game;
+            struct retro_system_info info;
+            int r;
+            unload_game();
+            r=read_full_game(path);
+            if(r<0)return r;
+            if(!core_initialized) {
+              retro_set_environment(core_environment);
+              retro_set_video_refresh(video_cb);
+              retro_set_audio_sample(audio_one);
+              retro_set_audio_sample_batch(audio_many);
+              retro_set_input_poll(input_poll);
+              retro_set_input_state(input_state);
+              retro_init();core_initialized=1;
+            }
+            retro_get_system_info(&info);
+            memset(&game,0,sizeof(game));
+            game.path=path;game.data=game_data;game.size=game_size;
+            if(!retro_load_game(&game)) {unload_game();return -104;}
+            core_loaded=1;
+            retro_set_controller_port_device(0,RETRO_DEVICE_JOYPAD);
+            return 0;
+          }
+          static void draw_game(void) {
+            if(video_received) {
+              gsKit_clear(gs,GS_SETREG_RGBAQ(0,0,0,0x80,0));
+              tex.Mem=(void *)pixels;
+              gsKit_texture_upload(gs,&tex);
+              gsKit_prim_sprite_texture(gs,&tex,
+                0.0f,0.0f,0.0f,0.0f,640.0f,448.0f,
+                (float)frame_w,(float)frame_h,1,
+                GS_SETREG_RGBAQ(0x80,0x80,0x80,0x80,0));
+            } else {
+              title_screen("WAITING FOR VIDEO");
+            }
+          }
+          int main(int argc,char **argv) {
+            int r;
+            (void)argc;(void)argv;
+            gs=gsKit_init_global();
+            if(!gs)return 1;
+            gs->PSM=GS_PSM_CT16;
+            gs->PSMZ=GS_PSMZ_16;
+            gs->ZBuffering=GS_SETTING_OFF;
+            dmaKit_init(D_CTRL_RELE_OFF,D_CTRL_MFD_OFF,D_CTRL_STS_UNSPEC,
+                        D_CTRL_STD_OFF,D_CTRL_RCYC_8,1<<DMA_CHANNEL_GIF);
+            dmaKit_chan_init(DMA_CHANNEL_GIF);
+            gsKit_init_screen(gs);
+            gsKit_mode_switch(gs,GS_ONESHOT);
+            memset(&tex,0,sizeof(tex));
+            tex.Width=TEX_SIZE;tex.Height=TEX_SIZE;tex.PSM=GS_PSM_CT32;tex.Mem=pixels;
+            tex.Vram=gsKit_vram_alloc(gs,gsKit_texture_size(TEX_SIZE,TEX_SIZE,GS_PSM_CT32),GSKIT_ALLOC_USERBUFFER);
+            SifInitRpc(0);
+            SifLoadModule("rom0:XSIO2MAN",0,NULL);
+            SifLoadModule("rom0:XPADMAN",0,NULL);
+            if(padInit(0)==1) padPortOpen(0,0,pad_buf);
+            screen=0;
+            for(;;) {
+              char tmp[80];
+              pad_scan();
+              if(screen==0) {
+                title_screen("BEETLE CORE - PC ENGINE ONLY");
+                label(52,210,3,"X OPEN USB ROMS",GS_SETREG_RGBAQ(230,240,245,0x80,0));
+                if(status_code<0) {
+                  snprintf(tmp,sizeof(tmp),"ERROR %d",status_code);
+                  label(52,299,2,tmp,GS_SETREG_RGBAQ(230,240,245,0x80,0));
+                }
+                if(buttons_edge&PAD_CROSS) {
+                  status_code=usb_init();
+                  if(status_code>=0) {
+                    strcpy(folder,"mass:/");status_code=scan_dir();
+                    if(status_code<0) {strcpy(folder,"mass0:/");status_code=scan_dir();}
+                    if(status_code>=0)screen=1;
+                  }
+                }
+                refresh_screen();
+              } else if(screen==1) {
+                if(nentries>0) {
+                  if(buttons_edge&PAD_UP)selected=(selected+nentries-1)%nentries;
+                  if(buttons_edge&PAD_DOWN)selected=(selected+1)%nentries;
+                }
+                if(buttons_edge&PAD_CIRCLE)enter_parent();
+                if((buttons_edge&PAD_CROSS) && nentries>0) {
+                  char next[MAX_PATH];
+                  int written=snprintf(next,sizeof(next),"%s%s%s",folder,
+                    entries[selected].name,entries[selected].dir?"/":"");
+                  if(written<0 || written>=(int)sizeof(next)) status_code=-105;
+                  else if(entries[selected].dir) {
+                    strcpy(folder,next);status_code=scan_dir();
+                  } else {
+                    strcpy(game_path,next);
+                    status_code=begin_game(game_path);
+                    if(status_code>=0)screen=2;
+                  }
+                }
+                render_browser();refresh_screen();
+              } else {
+                if((buttons_now&(PAD_L1|PAD_R1|PAD_START))==(PAD_L1|PAD_R1|PAD_START)) {
+                  unload_game();screen=1;
+                  buttons_prev=buttons_now;
+                  continue;
+                }
+                retro_run();
+                draw_game();refresh_screen();
+              }
+            }
+            return 0;
+          }
+          PCE_FRONTEND_C
+          cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
+          EE_BIN = PCE-Fast-Only-PS2.ELF
+          EE_OBJS = pce_only.o bdm.o usb.o iomanx.o filexio.o
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
-          EE_INCS += -I$(GSKIT)/include
+          EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC)
           EE_LDFLAGS += -L$(GSKIT)/lib
-          EE_LIBS += -lgskit -ldmakit -lpad -lfileXio -lpatches -lm
+          EE_LIBS += $(PCE_RAW_LIB) -lgskit -ldmakit -lpad -lfileXio -lpatches -lz -lm -lstdc++
           all: $(EE_BIN)
           clean:
-          	rm -f $(EE_BIN) $(EE_OBJS)
+          	rm -f $(EE_OBJS) $(EE_BIN)
           include $(PS2SDK)/samples/Makefile.pref
           include $(PS2SDK)/samples/Makefile.eeglobal
-          V11_MAKEFILE
+          PCE_FRONTEND_MAKE
+          test -s pce-only/pce_only.c
+          test -s pce-only/Makefile
 
-      - name: Embed PS2 drivers
+      - name: Embed USB IRX drivers
         shell: sh
         run: |
           set -eu
-          cd ps2-v11
-          bin2c usbd.irx exfat_bdm.c exfat_bdm_irx
-          bin2c usbhdfsd.irx exfat_usb.c exfat_usb_irx
+          cd pce-only
+          bin2c usbd.irx bdm.c bdm_irx
+          bin2c usbhdfsd.irx usb.c usb_irx
           bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
           bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
 
-      - name: Compile PS2 V11 ELF
-        working-directory: ps2-v11
+      - name: Compile independent PCE-only PS2 ELF
         shell: sh
         run: |
-          if make -j2 > build.log 2>&1; then
-            ls -lh Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11.ELF
+          set -eu
+          RAW="$(pwd)/aurora/build/beetle-pce-fast-src/mednafen_pce_fast_libretro_ps2_raw.a"
+          HEADER="$(find aurora/src/third_party/beetle-pce-fast -name libretro.h -type f | head -n 1)"
+          test -n "$HEADER" && test -s "$HEADER" || {
+            echo 'Missing Libretro public header'; exit 1;
+          }
+          LIBRETRO_INC="$(pwd)/$(dirname "$HEADER")"
+          echo "Libretro include: $LIBRETRO_INC"
+          if make -C pce-only -j2 PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" > frontend-build.log 2>&1; then
+            echo 'Standalone single-core ELF compiled.'
           else
-            grep -n -m 40 -E 'error:|undefined reference|No such file|cannot find' build.log || true
-            tail -n 130 build.log
+            tail -n 180 frontend-build.log
             exit 1
           fi
+          test -s pce-only/PCE-Fast-Only-PS2.ELF
+          ls -lh pce-only/PCE-Fast-Only-PS2.ELF
 
-      - name: Check executable MIPS ELF
-        working-directory: ps2-v11
+      - name: Verify ELF and separate core source
         shell: sh
         run: |
-          python3 - <<'PY'
-          import struct
+          set -eu
+          python3 - <<'PY_CHECK'
           from pathlib import Path
-          p=Path('Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11.ELF')
-          h=p.read_bytes()[:20]
-          assert h[:4]==b'\x7fELF', 'ELF header missing'
-          assert h[4:6]==bytes((1,1)), 'Must be 32-bit little-endian'
-          assert struct.unpack_from('<H',h,18)[0]==8, 'Not MIPS'
-          print('PS2-compatible MIPS ELF header:',p.stat().st_size,'bytes')
-          PY
+          import struct
+          p=Path('pce-only/PCE-Fast-Only-PS2.ELF')
+          b=p.read_bytes()[:20]
+          assert b[:4] == b'\x7fELF', 'Not an ELF'
+          assert b[4:6] == bytes([1,1]), 'Not little-endian ELF32'
+          assert struct.unpack_from('<H',b,18)[0] == 8, 'Not MIPS'
+          print('ELF header validated; gameplay still requires a PS2 test.')
+          PY_CHECK
 
-      - name: Upload build log
+      - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-V11-build-log
-          path: ps2-v11/build.log
+          name: PCE-Fast-Only-build-logs
+          path: |
+            aurora-revision.txt
+            core-build.log
+            frontend-build.log
+            pce-symbols.txt
           if-no-files-found: warn
 
-      - name: Upload PS2 V11 ELF
+      - name: Upload PCE-only ELF and source for GPL compliance
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11
-          path: ps2-v11/Beetle-PCE-Fast-EXFAT-SPEED-TRACE-V11.ELF
+          name: PCE-Fast-Only-PS2-Experimental
+          path: |
+            pce-only/PCE-Fast-Only-PS2.ELF
+            pce-only/pce_only.c
+            pce-only/Makefile
+            aurora/LICENSE
+            aurora/LICENSES/Beetle-PCE-Fast-GPL-2.0.txt
           if-no-files-found: error
