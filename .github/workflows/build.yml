@@ -1,5 +1,5 @@
 
-name: Beetle PCE Fast PS2 exFAT DEBUG V4
+name: Beetle PCE Fast PS2 exFAT ROM Browser V5
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Compile exFAT USB diagnostic ELF
+    name: Compile PS2 exFAT ROM browser
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -22,37 +22,45 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install required utilities
+      - name: Install utilities
         run: |
+          set -eu
           apk add --no-cache make python3 unzip build-base
 
-      - name: Extract existing exFAT drivers
+      - name: Extract exFAT IOP modules
         shell: sh
         run: |
           set -eu
           test -s FCEUmm-PS2-exFAT-integrated-2026.zip
-          mkdir -p exfat-menu-test
+          mkdir -p ps2-rom-browser
 
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
             FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx \
-            > exfat-menu-test/usbd.irx
+            > ps2-rom-browser/usbd.irx
 
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
             FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx \
-            > exfat-menu-test/usbhdfsd.irx
+            > ps2-rom-browser/usbhdfsd.irx
 
-          test -s exfat-menu-test/usbd.irx
-          test -s exfat-menu-test/usbhdfsd.irx
+          test -s ps2-rom-browser/usbd.irx
+          test -s ps2-rom-browser/usbhdfsd.irx
           test -s "$PS2SDK/iop/irx/iomanX.irx"
           test -s "$PS2SDK/iop/irx/fileXio.irx"
           command -v bin2c
 
-      - name: Generate PS2 diagnostic source
+      - name: Generate PS2 ROM browser source
         shell: sh
         run: |
-          mkdir -p exfat-menu-test
+          set -eu
+          mkdir -p ps2-rom-browser
 
-          cat > exfat-menu-test/menu_test.c <<'END_PS2_SOURCE'
+          cat > ps2-rom-browser/browser.c <<'PS2_BROWSER_C'
+          /*
+           * PS2 exFAT ROM browser V5.
+           * Read-only diagnostic.
+           * PC Engine emulation is not integrated.
+           */
+
           #include <gsKit.h>
           #include <dmaKit.h>
           #include <stddef.h>
@@ -63,11 +71,16 @@ jobs:
           #include <iopheap.h>
           #include <fileXio_rpc.h>
           #include <io_common.h>
+          #include <iox_stat.h>
           #include <stdio.h>
+          #include <stdlib.h>
           #include <string.h>
           #include <ctype.h>
 
-          /* Read-only USB diagnostic. No ROM emulation. */
+          #define MAX_ITEMS 120
+          #define VISIBLE 8
+          #define PATH_CAP 512
+          #define NAME_CAP 256
 
           typedef struct {
               char letter;
@@ -121,7 +134,14 @@ jobs:
           {
               unsigned int i;
 
-              for (i = 0; i < sizeof(kFont) / sizeof(kFont[0]); ++i) {
+              if (c >= 'a' && c <= 'z')
+                  c = (char)(c - 32);
+
+              for (
+                  i = 0;
+                  i < sizeof(kFont) / sizeof(kFont[0]);
+                  ++i
+              ) {
                   if (kFont[i].letter == c)
                       return &kFont[i];
               }
@@ -129,7 +149,7 @@ jobs:
               return NULL;
           }
 
-          static void print_pixels(
+          static void draw_text(
               GSGLOBAL *gs,
               int x,
               int y,
@@ -141,22 +161,33 @@ jobs:
               int i, row, col;
 
               for (i = 0; message[i] != '\0'; ++i) {
-                  const FontGlyph *glyph = find_glyph(message[i]);
+                  const FontGlyph *glyph = find_glyph(
+                      message[i]
+                  );
 
-                  if (glyph != NULL) {
-                      for (row = 0; row < 7; ++row) {
-                          for (col = 0; col < 5; ++col) {
-                              if (glyph->rows[row][col] == '#') {
-                                  float x1 = (float)(x + (i * 6 + col) * scale);
-                                  float y1 = (float)(y + row * scale);
+                  if (glyph == NULL)
+                      continue;
 
-                                  gsKit_prim_sprite(
-                                      gs, x1, y1,
-                                      x1 + (float)scale,
-                                      y1 + (float)scale,
-                                      1, color
-                                  );
-                              }
+                  for (row = 0; row < 7; ++row) {
+                      for (col = 0; col < 5; ++col) {
+                          if (glyph->rows[row][col] == '#') {
+                              float x1 = (float)(
+                                  x + (i * 6 + col) * scale
+                              );
+
+                              float y1 = (float)(
+                                  y + row * scale
+                              );
+
+                              gsKit_prim_sprite(
+                                  gs,
+                                  x1,
+                                  y1,
+                                  x1 + scale,
+                                  y1 + scale,
+                                  1,
+                                  color
+                              );
                           }
                       }
                   }
@@ -165,381 +196,76 @@ jobs:
 
           extern unsigned char exfat_bdm_irx[];
           extern unsigned int size_exfat_bdm_irx;
+
           extern unsigned char exfat_usb_irx[];
           extern unsigned int size_exfat_usb_irx;
+
           extern unsigned char iomanx_irx[];
           extern unsigned int size_iomanx_irx;
+
           extern unsigned char filexio_irx[];
           extern unsigned int size_filexio_irx;
 
-          #define NA (-9999)
-
-          typedef struct {
-              const char *root;
-              const char *file;
-              int dir_open;
-              int dir_items;
-              int dir_found;
-              int dir_last_rc;
-              int stat_rc;
-              int stat_size;
-              int file_open;
-              int seek_end;
-              int seek_start;
-              int bytes_read;
-              int seek_after;
-              int file_close;
-              char first_file[32];
-              char sample[24];
-          } PathTest;
-
-          static PathTest paths[2] = {
-              {
-                  .root = "mass:/",
-                  .file = "mass:/PS2TEST.TXT"
-              },
-              {
-                  .root = "mass0:/",
-                  .file = "mass0:/PS2TEST.TXT"
-              }
-          };
-
-          static int usb_phase = 0;
-          static int usb_error = 0;
-          static int usb_bdm_id = NA;
-          static int usb_usb_id = NA;
-          static int usb_bdm_status = NA;
-          static int usb_usb_status = NA;
-          static int usb_ioman_status = NA;
-          static int usb_filexio_status = NA;
-          static int usb_rpc_status = NA;
-          static int usb_rpc_ready = 0;
-          static int usb_frames = 0;
-          static int diag_view = 0;
-
-          static iox_stat_t file_stat
+          static char pad_buffer[256]
               __attribute__((aligned(64)));
 
           static iox_dirent_t dir_entry
               __attribute__((aligned(64)));
 
-          static unsigned char data_buffer[64]
+          static iox_stat_t rom_stat
               __attribute__((aligned(64)));
 
-          static void clear_results(void)
-          {
-              int i;
-
-              for (i = 0; i < 2; ++i) {
-                  paths[i].dir_open = NA;
-                  paths[i].dir_items = 0;
-                  paths[i].dir_found = 0;
-                  paths[i].dir_last_rc = NA;
-                  paths[i].stat_rc = NA;
-                  paths[i].stat_size = NA;
-                  paths[i].file_open = NA;
-                  paths[i].seek_end = NA;
-                  paths[i].seek_start = NA;
-                  paths[i].bytes_read = NA;
-                  paths[i].seek_after = NA;
-                  paths[i].file_close = NA;
-                  paths[i].first_file[0] = 0;
-                  paths[i].sample[0] = 0;
-              }
-          }
-
-          static void start_usb_stack(void)
-          {
-              int rc;
-              int result = 0;
-
-              usb_phase = -1;
-              usb_error = 0;
-              clear_results();
-
-              SifLoadFileInit();
-              SifInitIopHeap();
-              sbv_patch_enable_lmb();
-
-              rc = SifExecModuleBuffer(
-                  iomanx_irx,
-                  size_iomanx_irx,
-                  0, NULL, &result
-              );
-
-              usb_ioman_status = result;
-
-              if (rc < 0 || result < 0) {
-                  usb_error = rc < 0 ? rc : result;
-                  return;
-              }
-
-              result = 0;
-
-              rc = SifExecModuleBuffer(
-                  filexio_irx,
-                  size_filexio_irx,
-                  0, NULL, &result
-              );
-
-              usb_filexio_status = result;
-
-              if (rc < 0 || result < 0) {
-                  usb_error = rc < 0 ? rc : result;
-                  return;
-              }
-
-              usb_rpc_status = fileXioInit();
-
-              if (usb_rpc_status < 0) {
-                  usb_error = usb_rpc_status;
-                  return;
-              }
-
-              usb_rpc_ready = 1;
-              result = 0;
-
-              usb_bdm_id = SifExecModuleBuffer(
-                  exfat_bdm_irx,
-                  size_exfat_bdm_irx,
-                  0, NULL, &result
-              );
-
-              usb_bdm_status = result;
-
-              if (usb_bdm_id < 0 || result < 0) {
-                  usb_error = usb_bdm_id < 0
-                      ? usb_bdm_id : result;
-                  return;
-              }
-
-              result = 0;
-
-              usb_usb_id = SifExecModuleBuffer(
-                  exfat_usb_irx,
-                  size_exfat_usb_irx,
-                  0, NULL, &result
-              );
-
-              usb_usb_status = result;
-
-              if (usb_usb_id < 0 || result < 0) {
-                  usb_error = usb_usb_id < 0
-                      ? usb_usb_id : result;
-                  return;
-              }
-
-              usb_phase = 2;
-              usb_frames = 0;
-          }
-
-          static int name_matches(
-              const char *a,
-              const char *b
-          )
-          {
-              while (*a && *b) {
-                  if (
-                      toupper((unsigned char)*a) !=
-                      toupper((unsigned char)*b)
-                  ) {
-                      return 0;
-                  }
-
-                  ++a;
-                  ++b;
-              }
-
-              return *a == 0 && *b == 0;
-          }
-
-          static void diagnostic_scan(void)
-          {
-              int i, fd, dirfd, rc, n, request;
-
-              if (!usb_rpc_ready)
-                  return;
-
-              clear_results();
-
-              for (i = 0; i < 2; ++i) {
-                  PathTest *p = &paths[i];
-
-                  dirfd = fileXioDopen(p->root);
-                  p->dir_open = dirfd;
-
-                  if (dirfd >= 0) {
-                      for (n = 0; n < 32; ++n) {
-                          memset(
-                              &dir_entry,
-                              0,
-                              sizeof(dir_entry)
-                          );
-
-                          rc = fileXioDread(
-                              dirfd,
-                              &dir_entry
-                          );
-
-                          p->dir_last_rc = rc;
-
-                          if (rc <= 0)
-                              break;
-
-                          ++p->dir_items;
-
-                          if (p->first_file[0] == 0) {
-                              strncpy(
-                                  p->first_file,
-                                  dir_entry.name,
-                                  sizeof(p->first_file) - 1
-                              );
-
-                              p->first_file[
-                                  sizeof(p->first_file) - 1
-                              ] = 0;
-                          }
-
-                          if (name_matches(
-                              dir_entry.name,
-                              "PS2TEST.TXT"
-                          )) {
-                              p->dir_found = 1;
-                          }
-                      }
-
-                      fileXioDclose(dirfd);
-                  }
-
-                  memset(
-                      &file_stat,
-                      0,
-                      sizeof(file_stat)
-                  );
-
-                  p->stat_rc = fileXioGetStat(
-                      p->file,
-                      &file_stat
-                  );
-
-                  if (p->stat_rc >= 0) {
-                      p->stat_size = (int)file_stat.size;
-                  }
-
-                  fd = fileXioOpen(
-                      p->file,
-                      FIO_O_RDONLY
-                  );
-
-                  p->file_open = fd;
-
-                  if (fd < 0)
-                      continue;
-
-                  p->seek_end = fileXioLseek(
-                      fd,
-                      0,
-                      FIO_SEEK_END
-                  );
-
-                  p->seek_start = fileXioLseek(
-                      fd,
-                      0,
-                      FIO_SEEK_SET
-                  );
-
-                  memset(
-                      data_buffer,
-                      0,
-                      sizeof(data_buffer)
-                  );
-
-                  request = 27;
-
-                  if (
-                      p->stat_size > 0 &&
-                      p->stat_size < request
-                  ) {
-                      request = p->stat_size;
-                  }
-
-                  p->bytes_read = fileXioRead(
-                      fd,
-                      data_buffer,
-                      request
-                  );
-
-                  p->seek_after = fileXioLseek(
-                      fd,
-                      0,
-                      FIO_SEEK_CUR
-                  );
-
-                  if (p->bytes_read > 0) {
-                      int j;
-                      int limit = p->bytes_read;
-
-                      if (limit > 20)
-                          limit = 20;
-
-                      for (j = 0; j < limit; ++j) {
-                          char c = (char)data_buffer[j];
-
-                          p->sample[j] =
-                              (c >= 'a' && c <= 'z')
-                                  ? (char)(c - 32)
-                                  : c;
-
-                          if (!(
-                              (
-                                  p->sample[j] >= 'A' &&
-                                  p->sample[j] <= 'Z'
-                              ) || (
-                                  p->sample[j] >= '0' &&
-                                  p->sample[j] <= '9'
-                              ) ||
-                              p->sample[j] == ' '
-                          )) {
-                              p->sample[j] = ' ';
-                          }
-                      }
-
-                      p->sample[limit] = 0;
-                  }
-
-                  p->file_close = fileXioClose(fd);
-              }
-
-              usb_phase = 3;
-          }
-
-          static char pad_buffer[256]
+          static unsigned char rom_header[64]
               __attribute__((aligned(64)));
 
+          typedef struct {
+              char name[NAME_CAP];
+              unsigned int size;
+              int directory;
+          } BrowserItem;
+
+          static BrowserItem items[MAX_ITEMS];
+
+          static int item_count = 0;
+          static int selected = 0;
+          static int hidden_count = 0;
+          static int screen = 0;
+
+          static int usb_ready = 0;
           static int pad_opened = 0;
           static unsigned int old_buttons = 0;
 
+          static int load_error = 0;
+          static int browse_error = 0;
+          static int rom_open = -9999;
+          static int rom_read = -9999;
+          static int rom_size = -9999;
+
+          static char selected_rom[PATH_CAP];
+          static char current_path[PATH_CAP] = "mass:/";
+
+          static char status_text[48] =
+              "PRESS X TO BROWSE";
+
           static int initialize_controller(void)
           {
-              int io_module;
-              int pad_module;
+              int a, b;
 
               SifInitRpc(0);
 
-              io_module = SifLoadModule(
+              a = SifLoadModule(
                   "rom0:XSIO2MAN",
-                  0, NULL
+                  0,
+                  NULL
               );
 
-              pad_module = SifLoadModule(
+              b = SifLoadModule(
                   "rom0:XPADMAN",
-                  0, NULL
+                  0,
+                  NULL
               );
 
-              if (io_module < 0 || pad_module < 0)
-                  return 0;
-
-              if (padInit(0) != 1)
+              if (a < 0 || b < 0 || padInit(0) != 1)
                   return 0;
 
               pad_opened = (
@@ -549,13 +275,13 @@ jobs:
               return pad_opened;
           }
 
-          static unsigned int read_new_buttons(
+          static unsigned int new_buttons(
               int *connected
           )
           {
               struct padButtonStatus status;
               unsigned int pressed;
-              unsigned int newly_pressed;
+              unsigned int newly;
               int state;
 
               *connected = 0;
@@ -582,25 +308,422 @@ jobs:
                   (unsigned int)(0xffffu ^ status.btns)
               );
 
-              newly_pressed = pressed & ~old_buttons;
+              newly = pressed & ~old_buttons;
               old_buttons = pressed;
 
-              return newly_pressed;
+              return newly;
           }
 
-          static void draw_menu(
+          static int load_usb(void)
+          {
+              int id, result;
+
+              if (usb_ready)
+                  return 0;
+
+              SifLoadFileInit();
+              SifInitIopHeap();
+              sbv_patch_enable_lmb();
+
+              result = 0;
+
+              id = SifExecModuleBuffer(
+                  iomanx_irx,
+                  size_iomanx_irx,
+                  0,
+                  NULL,
+                  &result
+              );
+
+              if (id < 0 || result < 0)
+                  return id < 0 ? id : result;
+
+              result = 0;
+
+              id = SifExecModuleBuffer(
+                  filexio_irx,
+                  size_filexio_irx,
+                  0,
+                  NULL,
+                  &result
+              );
+
+              if (id < 0 || result < 0)
+                  return id < 0 ? id : result;
+
+              id = fileXioInit();
+
+              if (id < 0)
+                  return id;
+
+              result = 0;
+
+              id = SifExecModuleBuffer(
+                  exfat_bdm_irx,
+                  size_exfat_bdm_irx,
+                  0,
+                  NULL,
+                  &result
+              );
+
+              if (id < 0 || result < 0)
+                  return id < 0 ? id : result;
+
+              result = 0;
+
+              id = SifExecModuleBuffer(
+                  exfat_usb_irx,
+                  size_exfat_usb_irx,
+                  0,
+                  NULL,
+                  &result
+              );
+
+              if (id < 0 || result < 0)
+                  return id < 0 ? id : result;
+
+              usb_ready = 1;
+
+              return 0;
+          }
+
+          static int is_rom(const char *name)
+          {
+              const char *ext = strrchr(name, '.');
+
+              if (ext == NULL || strlen(ext) != 4)
+                  return 0;
+
+              return (
+                  tolower((unsigned char)ext[1]) == 'p' &&
+                  tolower((unsigned char)ext[2]) == 'c' &&
+                  tolower((unsigned char)ext[3]) == 'e'
+              ) || (
+                  tolower((unsigned char)ext[1]) == 's' &&
+                  tolower((unsigned char)ext[2]) == 'g' &&
+                  tolower((unsigned char)ext[3]) == 'x'
+              );
+          }
+
+          static int sort_items(
+              const void *aa,
+              const void *bb
+          )
+          {
+              const BrowserItem *a = (
+                  const BrowserItem *)aa;
+
+              const BrowserItem *b = (
+                  const BrowserItem *)bb;
+
+              unsigned int i;
+
+              if (a->directory != b->directory)
+                  return b->directory - a->directory;
+
+              for (i = 0; i < NAME_CAP; ++i) {
+                  int ca = tolower(
+                      (unsigned char)a->name[i]
+                  );
+
+                  int cb = tolower(
+                      (unsigned char)b->name[i]
+                  );
+
+                  if (ca != cb)
+                      return ca - cb;
+
+                  if (ca == 0)
+                      return 0;
+              }
+
+              return 0;
+          }
+
+          static int build_path(
+              char *output,
+              size_t capacity,
+              const char *name,
+              int folder
+          )
+          {
+              int written = snprintf(
+                  output,
+                  capacity,
+                  "%s%s%s",
+                  current_path,
+                  name,
+                  folder ? "/" : ""
+              );
+
+              return (
+                  written > 0 &&
+                  (size_t)written < capacity
+              );
+          }
+
+          static int list_directory(void)
+          {
+              int handle, rc, i;
+
+              item_count = 0;
+              selected = 0;
+              hidden_count = 0;
+              browse_error = 0;
+
+              handle = fileXioDopen(current_path);
+
+              if (handle < 0) {
+                  browse_error = handle;
+
+                  snprintf(
+                      status_text,
+                      sizeof(status_text),
+                      "DIR ERROR %d",
+                      handle
+                  );
+
+                  return handle;
+              }
+
+              for (i = 0; i < 1024; ++i) {
+                  int is_dir;
+
+                  memset(
+                      &dir_entry,
+                      0,
+                      sizeof(dir_entry)
+                  );
+
+                  rc = fileXioDread(
+                      handle,
+                      &dir_entry
+                  );
+
+                  if (rc <= 0) {
+                      if (rc < 0)
+                          browse_error = rc;
+
+                      break;
+                  }
+
+                  dir_entry.name[NAME_CAP - 1] = '\0';
+
+                  if (
+                      dir_entry.name[0] == '\0' ||
+                      strcmp(dir_entry.name, ".") == 0 ||
+                      strcmp(dir_entry.name, "..") == 0
+                  ) {
+                      continue;
+                  }
+
+                  is_dir = FIO_S_ISDIR(
+                      dir_entry.stat.mode
+                  );
+
+                  if (
+                      !is_dir &&
+                      !is_rom(dir_entry.name)
+                  ) {
+                      continue;
+                  }
+
+                  if (item_count >= MAX_ITEMS) {
+                      ++hidden_count;
+                      continue;
+                  }
+
+                  strncpy(
+                      items[item_count].name,
+                      dir_entry.name,
+                      NAME_CAP - 1
+                  );
+
+                  items[item_count].name[
+                      NAME_CAP - 1
+                  ] = '\0';
+
+                  items[item_count].directory = is_dir;
+                  items[item_count].size =
+                      dir_entry.stat.size;
+
+                  ++item_count;
+              }
+
+              fileXioDclose(handle);
+
+              qsort(
+                  items,
+                  item_count,
+                  sizeof(items[0]),
+                  sort_items
+              );
+
+              if (browse_error < 0) {
+                  snprintf(
+                      status_text,
+                      sizeof(status_text),
+                      "READ DIR ERROR %d",
+                      browse_error
+                  );
+              } else {
+                  snprintf(
+                      status_text,
+                      sizeof(status_text),
+                      "FOUND %d ENTRIES",
+                      item_count
+                  );
+              }
+
+              return browse_error;
+          }
+
+          static void parent_directory(void)
+          {
+              size_t n = strlen(current_path);
+
+              size_t base = (
+                  strncmp(current_path, "mass0:/", 7) == 0
+              ) ? 7 : 6;
+
+              if (n <= base) {
+                  screen = 0;
+                  return;
+              }
+
+              if (current_path[n - 1] == '/')
+                  --n;
+
+              while (
+                  n > base &&
+                  current_path[n - 1] != '/'
+              ) {
+                  --n;
+              }
+
+              current_path[n] = '\0';
+
+              list_directory();
+          }
+
+          static void select_item(void)
+          {
+              int fd, result;
+
+              if (
+                  selected < 0 ||
+                  selected >= item_count
+              ) {
+                  return;
+              }
+
+              if (!build_path(
+                  selected_rom,
+                  sizeof(selected_rom),
+                  items[selected].name,
+                  items[selected].directory
+              )) {
+                  strcpy(
+                      status_text,
+                      "PATH TOO LONG"
+                  );
+
+                  return;
+              }
+
+              if (items[selected].directory) {
+                  strncpy(
+                      current_path,
+                      selected_rom,
+                      sizeof(current_path) - 1
+                  );
+
+                  current_path[
+                      sizeof(current_path) - 1
+                  ] = '\0';
+
+                  list_directory();
+
+                  return;
+              }
+
+              rom_open = -9999;
+              rom_read = -9999;
+              rom_size = -9999;
+
+              memset(
+                  &rom_stat,
+                  0,
+                  sizeof(rom_stat)
+              );
+
+              result = fileXioGetStat(
+                  selected_rom,
+                  &rom_stat
+              );
+
+              if (result >= 0)
+                  rom_size = (int)rom_stat.size;
+
+              fd = fileXioOpen(
+                  selected_rom,
+                  FIO_O_RDONLY
+              );
+
+              rom_open = fd;
+
+              if (fd >= 0) {
+                  memset(
+                      rom_header,
+                      0,
+                      sizeof(rom_header)
+                  );
+
+                  rom_read = fileXioRead(
+                      fd,
+                      rom_header,
+                      16
+                  );
+
+                  fileXioClose(fd);
+              }
+
+              screen = 2;
+          }
+
+          static void compact_label(
+              char *output,
+              size_t output_length,
+              const char *source,
+              int limit
+          )
+          {
+              int i;
+
+              if (limit > (int)output_length - 1)
+                  limit = (int)output_length - 1;
+
+              for (
+                  i = 0;
+                  i < limit && source[i] != '\0';
+                  ++i
+              ) {
+                  unsigned char c = (
+                      unsigned char)source[i];
+
+                  output[i] = (
+                      c >= 32 && c < 127
+                  ) ? (char)toupper(c) : '_';
+              }
+
+              output[i] = '\0';
+          }
+
+          static void render(
               GSGLOBAL *gs,
-              int selected,
-              int page,
               int connected
           )
           {
-              const char *labels[3] = {
-                  "EXFAT USB TEST",
-                  "CONTROLLER TEST",
-                  "ABOUT"
-              };
-
               u64 background = GS_SETREG_RGBAQ(
                   12, 20, 35, 0x80, 0
               );
@@ -621,355 +744,271 @@ jobs:
                   156, 179, 195, 0x80, 0
               );
 
-              int i;
+              char line[80];
+              char label[48];
+
+              int i, first;
 
               gsKit_clear(gs, background);
 
               gsKit_prim_sprite(
-                  gs, 45, 42, 55, 142, 1, accent
+                  gs,
+                  42, 35,
+                  51, 128,
+                  1, accent
               );
 
-              print_pixels(
-                  gs, 76, 55, 3,
+              draw_text(
+                  gs, 67, 52, 3,
                   "BEETLE PCE FAST",
                   white
               );
 
-              print_pixels(
-                  gs, 77, 105, 2,
-                  "PS2 EXFAT USB DIAGNOSTIC",
+              draw_text(
+                  gs, 69, 100, 2,
+                  "PS2 EXFAT ROM BROWSER V5",
                   accent
               );
 
-              if (page == 0) {
-                  for (i = 0; i < 3; ++i) {
-                      float y = (float)(160 + i * 60);
+              if (screen == 0) {
+                  gsKit_prim_sprite(
+                      gs,
+                      57, 174,
+                      585, 221,
+                      1, panel
+                  );
 
-                      if (i == selected) {
+                  draw_text(
+                      gs, 80, 187, 3,
+                      "BROWSE USB ROMS",
+                      white
+                  );
+
+                  draw_text(
+                      gs, 80, 254, 2,
+                      "PCE AND SGX FILES",
+                      muted
+                  );
+
+                  draw_text(
+                      gs, 80, 308, 2,
+                      "X OPEN BROWSER",
+                      accent
+                  );
+
+                  if (load_error != 0) {
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "USB ERROR %d",
+                          load_error
+                      );
+
+                      draw_text(
+                          gs, 80, 350, 2,
+                          line, white
+                      );
+                  }
+
+              } else if (screen == 1) {
+                  compact_label(
+                      label,
+                      sizeof(label),
+                      current_path,
+                      28
+                  );
+
+                  draw_text(
+                      gs, 55, 143, 2,
+                      label, accent
+                  );
+
+                  first = selected - VISIBLE / 2;
+
+                  if (first < 0)
+                      first = 0;
+
+                  if (first + VISIBLE > item_count)
+                      first = item_count - VISIBLE;
+
+                  if (first < 0)
+                      first = 0;
+
+                  for (
+                      i = 0;
+                      i < VISIBLE &&
+                      first + i < item_count;
+                      ++i
+                  ) {
+                      int index = first + i;
+                      int y = 180 + i * 25;
+
+                      if (index == selected) {
                           gsKit_prim_sprite(
                               gs,
-                              60,
-                              y - 12,
-                              584,
-                              y + 39,
-                              1,
-                              panel
+                              52, y - 4,
+                              594, y + 21,
+                              1, panel
                           );
 
                           gsKit_prim_sprite(
                               gs,
-                              60,
-                              y - 12,
-                              67,
-                              y + 39,
-                              1,
-                              accent
+                              52, y - 4,
+                              57, y + 21,
+                              1, accent
                           );
                       }
 
-                      print_pixels(
+                      compact_label(
+                          label,
+                          sizeof(label),
+                          items[index].name,
+                          23
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "%s %s",
+                          items[index].directory
+                              ? "D" : "R",
+                          label
+                      );
+
+                      draw_text(
                           gs,
-                          84,
-                          (int)y,
-                          3,
-                          labels[i],
-                          i == selected ? white : muted
+                          68,
+                          y,
+                          2,
+                          line,
+                          index == selected
+                              ? white : muted
                       );
                   }
 
-                  print_pixels(
-                      gs, 67, 384, 2,
-                      "UP DOWN SELECT    X ENTER",
+                  if (item_count == 0) {
+                      draw_text(
+                          gs, 70, 206, 2,
+                          "NO PCE ROMS OR FOLDERS",
+                          muted
+                      );
+                  }
+
+                  snprintf(
+                      line,
+                      sizeof(line),
+                      "ITEMS %d HIDDEN %d",
+                      item_count,
+                      hidden_count
+                  );
+
+                  draw_text(
+                      gs, 55, 395, 2,
+                      line, accent
+                  );
+
+                  draw_text(
+                      gs, 55, 420, 2,
+                      "UP DOWN X OPEN O BACK",
                       accent
                   );
 
-              } else if (page == 1) {
-                  char line[80];
-
-                  PathTest *p = &paths[
-                      diag_view < 2 ? diag_view : 0
-                  ];
-
-                  print_pixels(
-                      gs, 65, 155, 3,
-                      "EXFAT USB DEBUG V4",
+              } else if (screen == 2) {
+                  draw_text(
+                      gs, 76, 170, 3,
+                      "ROM SELECTED",
                       white
                   );
 
-                  if (usb_phase == 0) {
-                      print_pixels(
-                          gs, 70, 201, 2,
-                          "PRESS X TO LOAD USB",
-                          accent
-                      );
-                  } else if (usb_phase == 1) {
-                      print_pixels(
-                          gs, 70, 201, 2,
-                          "STARTING MODULES",
-                          accent
-                      );
-                  } else if (usb_phase == 2) {
-                      print_pixels(
-                          gs, 70, 201, 2,
-                          "WAITING FOR USB",
-                          accent
-                      );
-                  } else if (usb_phase == -1) {
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "MODULE ERROR %d",
-                          usb_error
-                      );
-
-                      print_pixels(
-                          gs, 70, 201, 2,
-                          line, white
-                      );
-                  } else {
-                      print_pixels(
-                          gs, 70, 201, 2,
-                          "SCAN FINISHED",
-                          accent
-                      );
-                  }
-
-                  if (diag_view < 2) {
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "PATH %s",
-                          diag_view == 0
-                              ? "MASS"
-                              : "MASS0"
-                      );
-
-                      print_pixels(
-                          gs, 70, 229, 2,
-                          line, accent
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "DIR %d ITEMS %d FOUND %d",
-                          p->dir_open,
-                          p->dir_items,
-                          p->dir_found
-                      );
-
-                      print_pixels(
-                          gs, 70, 255, 2,
-                          line, white
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "STAT %d SIZE %d",
-                          p->stat_rc,
-                          p->stat_size
-                      );
-
-                      print_pixels(
-                          gs, 70, 281, 2,
-                          line, white
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "OPEN %d END %d START %d",
-                          p->file_open,
-                          p->seek_end,
-                          p->seek_start
-                      );
-
-                      print_pixels(
-                          gs, 70, 307, 2,
-                          line, white
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "READ %d POS %d CLOSE %d",
-                          p->bytes_read,
-                          p->seek_after,
-                          p->file_close
-                      );
-
-                      print_pixels(
-                          gs, 70, 333, 2,
-                          line, white
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "DATA %s",
-                          p->sample
-                      );
-
-                      print_pixels(
-                          gs, 70, 359, 2,
-                          line, accent
-                      );
-
-                  } else {
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "BDM ID %d RES %d",
-                          usb_bdm_id,
-                          usb_bdm_status
-                      );
-
-                      print_pixels(
-                          gs, 70, 229, 2,
-                          line, white
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "USB ID %d RES %d",
-                          usb_usb_id,
-                          usb_usb_status
-                      );
-
-                      print_pixels(
-                          gs, 70, 255, 2,
-                          line, white
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "IOMAN %d FILEXIO %d",
-                          usb_ioman_status,
-                          usb_filexio_status
-                      );
-
-                      print_pixels(
-                          gs, 70, 281, 2,
-                          line, white
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "RPC %d READY %d",
-                          usb_rpc_status,
-                          usb_rpc_ready
-                      );
-
-                      print_pixels(
-                          gs, 70, 307, 2,
-                          line, accent
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "MASS DREAD %d",
-                          paths[0].dir_last_rc
-                      );
-
-                      print_pixels(
-                          gs, 70, 333, 2,
-                          line, muted
-                      );
-
-                      snprintf(
-                          line,
-                          sizeof(line),
-                          "MASS0 DREAD %d",
-                          paths[1].dir_last_rc
-                      );
-
-                      print_pixels(
-                          gs, 70, 359, 2,
-                          line, muted
-                      );
-                  }
-
-                  print_pixels(
-                      gs, 65, 399, 2,
-                      "LEFT RIGHT PAGE  X TEST  O BACK",
-                      accent
+                  compact_label(
+                      label,
+                      sizeof(label),
+                      selected_rom,
+                      26
                   );
 
-              } else if (page == 2) {
-                  print_pixels(
-                      gs, 80, 187, 3,
-                      "CONTROLLER TEST",
-                      white
+                  draw_text(
+                      gs, 65, 233, 2,
+                      label, accent
                   );
 
-                  print_pixels(
-                      gs, 80, 255, 2,
-                      "DIRECTION AND X WORK",
-                      accent
+                  snprintf(
+                      line,
+                      sizeof(line),
+                      "SIZE %d",
+                      rom_size
                   );
 
-                  print_pixels(
-                      gs, 80, 330, 2,
-                      "CIRCLE TO GO BACK",
+                  draw_text(
+                      gs, 65, 270, 2,
+                      line, white
+                  );
+
+                  snprintf(
+                      line,
+                      sizeof(line),
+                      "OPEN %d READ %d",
+                      rom_open,
+                      rom_read
+                  );
+
+                  draw_text(
+                      gs, 65, 305, 2,
+                      line, white
+                  );
+
+                  draw_text(
+                      gs, 65, 349, 2,
+                      "CORE NOT INTEGRATED",
                       muted
+                  );
+
+                  draw_text(
+                      gs, 65, 390, 2,
+                      "O RETURN TO FILES",
+                      accent
                   );
 
               } else {
-                  print_pixels(
-                      gs, 80, 187, 3,
-                      "ABOUT",
+                  draw_text(
+                      gs, 76, 170, 3,
+                      "STATUS",
                       white
                   );
 
-                  print_pixels(
-                      gs, 80, 257, 2,
-                      "USB EXFAT DIAGNOSTIC",
-                      accent
+                  compact_label(
+                      label,
+                      sizeof(label),
+                      status_text,
+                      31
                   );
 
-                  print_pixels(
-                      gs, 80, 304, 2,
-                      "CORE NOT PORTED",
-                      muted
+                  draw_text(
+                      gs, 66, 237, 2,
+                      label, accent
                   );
 
-                  print_pixels(
-                      gs, 80, 362, 2,
-                      "CIRCLE TO GO BACK",
+                  draw_text(
+                      gs, 66, 310, 2,
+                      "X TRY AGAIN",
+                      white
+                  );
+
+                  draw_text(
+                      gs, 66, 380, 2,
+                      "O BACK TO MENU",
                       muted
                   );
               }
 
-              gsKit_prim_sprite(
-                  gs,
-                  60, 431,
-                  584, 433,
-                  1, panel
-              );
-
-              print_pixels(
-                  gs, 65, 448, 2,
-                  connected
-                      ? "PAD 1 CONNECTED"
-                      : "WAITING FOR PAD 1",
-                  accent
-              );
+              (void)connected;
           }
 
           int main(int argc, char **argv)
           {
               GSGLOBAL *gs;
-
-              int selected = 0;
-              int page = 0;
+              unsigned int keys;
               int connected = 0;
-
-              unsigned int new_buttons;
 
               (void)argc;
               (void)argv;
@@ -997,101 +1036,132 @@ jobs:
               );
 
               gsKit_init_screen(gs);
-              gsKit_mode_switch(gs, GS_ONESHOT);
+              gsKit_mode_switch(
+                  gs,
+                  GS_ONESHOT
+              );
 
               initialize_controller();
 
-              while (1) {
-                  new_buttons = read_new_buttons(
+              for (;;) {
+                  keys = new_buttons(
                       &connected
                   );
 
-                  if (page == 0) {
-                      if (new_buttons & PAD_UP)
-                          selected = (selected + 2) % 3;
-
-                      if (new_buttons & PAD_DOWN)
-                          selected = (selected + 1) % 3;
-
-                      if (new_buttons & PAD_CROSS)
-                          page = selected + 1;
-
-                  } else if (
-                      new_buttons &
-                      (PAD_CIRCLE | PAD_TRIANGLE)
+                  if (
+                      screen == 0 &&
+                      (keys & PAD_CROSS)
                   ) {
-                      page = 0;
+                      if (!usb_ready) {
+                          screen = 3;
 
-                  } else if (
-                      page == 1 &&
-                      (new_buttons & PAD_CROSS)
-                  ) {
-                      if (!usb_rpc_ready) {
-                          usb_phase = 1;
-
-                          draw_menu(
-                              gs,
-                              selected,
-                              page,
-                              connected
+                          strcpy(
+                              status_text,
+                              "LOADING USB MODULES"
                           );
 
+                          render(gs, connected);
                           gsKit_queue_exec(gs);
                           gsKit_sync_flip(gs);
 
-                          start_usb_stack();
+                          load_error = load_usb();
+                      }
 
+                      if (load_error < 0) {
+                          screen = 3;
+
+                          snprintf(
+                              status_text,
+                              sizeof(status_text),
+                              "USB ERROR %d",
+                              load_error
+                          );
                       } else {
-                          usb_phase = 2;
-                          usb_frames = 0;
-                          clear_results();
+                          strcpy(
+                              current_path,
+                              "mass:/"
+                          );
+
+                          if (list_directory() < 0) {
+                              strcpy(
+                                  current_path,
+                                  "mass0:/"
+                              );
+
+                              if (list_directory() < 0) {
+                                  screen = 3;
+                              } else {
+                                  screen = 1;
+                              }
+                          } else {
+                              screen = 1;
+                          }
+                      }
+
+                  } else if (screen == 1) {
+                      if (
+                          (keys & PAD_UP) &&
+                          item_count > 0
+                      ) {
+                          selected = (
+                              selected + item_count - 1
+                          ) % item_count;
+                      }
+
+                      if (
+                          (keys & PAD_DOWN) &&
+                          item_count > 0
+                      ) {
+                          selected = (
+                              selected + 1
+                          ) % item_count;
+                      }
+
+                      if (keys & PAD_CROSS)
+                          select_item();
+
+                      if (
+                          keys &
+                          (PAD_CIRCLE | PAD_TRIANGLE)
+                      ) {
+                          parent_directory();
+                      }
+
+                      if (keys & PAD_SQUARE)
+                          list_directory();
+
+                  } else if (screen == 2) {
+                      if (
+                          keys &
+                          (PAD_CIRCLE | PAD_TRIANGLE)
+                      ) {
+                          screen = 1;
+                      }
+
+                  } else if (screen == 3) {
+                      if (keys & PAD_CIRCLE)
+                          screen = 0;
+
+                      if (keys & PAD_CROSS) {
+                          load_error = load_usb();
+
+                          if (load_error >= 0)
+                              screen = 0;
                       }
                   }
 
-                  if (
-                      page == 1 &&
-                      (new_buttons & PAD_LEFT)
-                  ) {
-                      diag_view = (diag_view + 2) % 3;
-                  }
-
-                  if (
-                      page == 1 &&
-                      (new_buttons & PAD_RIGHT)
-                  ) {
-                      diag_view = (diag_view + 1) % 3;
-                  }
-
-                  if (
-                      page == 1 &&
-                      usb_phase == 2
-                  ) {
-                      ++usb_frames;
-
-                      if (usb_frames >= 60) {
-                          usb_frames = 0;
-                          diagnostic_scan();
-                      }
-                  }
-
-                  draw_menu(
-                      gs,
-                      selected,
-                      page,
-                      connected
-                  );
-
+                  render(gs, connected);
                   gsKit_queue_exec(gs);
                   gsKit_sync_flip(gs);
               }
 
               return 0;
           }
-          END_PS2_SOURCE
+          PS2_BROWSER_C
 
-          cat > exfat-menu-test/Makefile <<'END_PS2_MAKEFILE'
-          EE_BIN = Beetle-PCE-Fast-EXFAT-DEBUG-V4.ELF
-          EE_OBJS = menu_test.o exfat_bdm.o exfat_usb.o iomanx.o filexio.o
+          cat > ps2-rom-browser/Makefile <<'PS2_BROWSER_MAKE'
+          EE_BIN = Beetle-PCE-Fast-EXFAT-BROWSER-V5.ELF
+          EE_OBJS = browser.o exfat_bdm.o exfat_usb.o iomanx.o filexio.o
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
           EE_INCS += -I$(GSKIT)/include
           EE_LDFLAGS += -L$(GSKIT)/lib
@@ -1104,13 +1174,13 @@ jobs:
 
           include $(PS2SDK)/samples/Makefile.pref
           include $(PS2SDK)/samples/Makefile.eeglobal
-          END_PS2_MAKEFILE
+          PS2_BROWSER_MAKE
 
-      - name: Embed IOP modules in ELF
+      - name: Embed IOP modules
         shell: sh
         run: |
           set -eu
-          cd exfat-menu-test
+          cd ps2-rom-browser
 
           bin2c usbd.irx exfat_bdm.c exfat_bdm_irx
           bin2c usbhdfsd.irx exfat_usb.c exfat_usb_irx
@@ -1121,34 +1191,32 @@ jobs:
           bin2c "$PS2SDK/iop/irx/fileXio.irx" \
             filexio.c filexio_irx
 
-          echo "Four IOP modules embedded."
-
-      - name: Compile PlayStation 2 diagnostic ELF
-        working-directory: exfat-menu-test
+      - name: Compile PS2 ROM browser
+        working-directory: ps2-rom-browser
         shell: sh
         run: |
           if make -j2 > build.log 2>&1; then
-            ls -lh Beetle-PCE-Fast-EXFAT-DEBUG-V4.ELF
+            ls -lh Beetle-PCE-Fast-EXFAT-BROWSER-V5.ELF
           else
-            echo "Build error:"
-
             grep -n -m 30 -E \
               'error:|undefined reference|No such file|cannot find' \
               build.log || true
-
-            tail -n 100 build.log
+            tail -n 120 build.log
             exit 1
           fi
 
-      - name: Verify PS2 ELF header
-        working-directory: exfat-menu-test
+      - name: Verify MIPS ELF
+        working-directory: ps2-rom-browser
         run: |
-          python3 - <<'PYCODE'
+          python3 - <<'PY'
           from pathlib import Path
           import struct
 
-          path = Path('Beetle-PCE-Fast-EXFAT-DEBUG-V4.ELF')
-          b = path.read_bytes()[:20]
+          p = Path(
+              'Beetle-PCE-Fast-EXFAT-BROWSER-V5.ELF'
+          )
+
+          b = p.read_bytes()[:20]
 
           assert b[:4] == b'\x7fELF'
           assert b[4] == 1
@@ -1156,24 +1224,24 @@ jobs:
           assert struct.unpack_from('<H', b, 18)[0] == 8
 
           print(
-              'Valid MIPS ELF:',
-              path.stat().st_size,
+              'Validated MIPS ELF:',
+              p.stat().st_size,
               'bytes'
           )
-          PYCODE
+          PY
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-exFAT-V4-build-log
-          path: exfat-menu-test/build.log
+          name: Beetle-PCE-Fast-V5-build-log
+          path: ps2-rom-browser/build.log
           if-no-files-found: warn
 
-      - name: Upload exFAT test ELF
+      - name: Upload ROM browser ELF
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-PCE-Fast-PS2-EXFAT-DEBUG-V4
-          path: exfat-menu-test/Beetle-PCE-Fast-EXFAT-DEBUG-V4.ELF
+          name: Beetle-PCE-Fast-PS2-EXFAT-BROWSER-V5
+          path: ps2-rom-browser/Beetle-PCE-Fast-EXFAT-BROWSER-V5.ELF
           if-no-files-found: error
