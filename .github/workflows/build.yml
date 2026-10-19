@@ -1,5 +1,5 @@
 
-name: Diagnose FCEUmm PS2 FAT32 Boot
+name: Build Original FCEUmm PS2 0.3.3
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Compile diagnostic ELF using FAT32 USB drivers
+    name: Build unmodified PS2 source
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
@@ -19,402 +19,69 @@ jobs:
       image: ps2dev/ps2dev:latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout original source
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install build utilities
         run: |
-          set -eu
-          apk add --no-cache make unzip python3 build-base binutils
+          apk add --no-cache make build-base
 
-      - name: Extract integrated FCEUmm source
+      - name: Verify original source and toolchain
         run: |
           set -eu
-          test -s FCEUmm-PS2-exFAT-integrated-2026.zip
-          unzip -q FCEUmm-PS2-exFAT-integrated-2026.zip
-          test -f FCEUmm-PS2-exFAT/Makefile.ps2
-          test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx
-          test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx
-          echo "Integrated source package extracted."
-
-      - name: Verify PS2 toolchain
-        run: |
-          set -eu
-          test -n "${PS2SDK:-}"
-          test -n "${GSKIT:-}"
+          test -f Makefile.ps2
+          test -f src/drivers/ps2/init.c
           test -d "$PS2SDK"
           test -d "$GSKIT"
           command -v mips64r5900el-ps2-elf-gcc
           command -v bin2c
-          command -v make
-          mips64r5900el-ps2-elf-gcc --version | head -n 1
+          echo "Original source detected. No source patches will be applied."
 
-      - name: Verify compatibility patches
-        working-directory: FCEUmm-PS2-exFAT
-        run: |
-          set -eu
-          grep -q -- '-DNEWLIB_PORT_AWARE' Makefile.ps2
-          grep -q -- '-fcommon' Makefile.ps2
-          grep -q 'NOT_PACKED' Makefile.ps2
-          grep -q 'io_dirent_t buf;' src/drivers/ps2/browser.c
-          grep -q '#include <stdlib.h>' src/drivers/ps2/cnfsettings.c
-          grep -q 'gsKit_texture_jpeg(' src/drivers/ps2/main.c
-          grep -q '#include <malloc.h>' src/drivers/ps2/main.c
-          grep -q '#include <stdlib.h>' src/drivers/ps2/ps2font.c
-          grep -q '#include <string.h>' src/drivers/ps2/menu.c
-          echo "Compatibility patches verified."
-
-      - name: Fix CopyFami name ownership
-        working-directory: FCEUmm-PS2-exFAT
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('src/fceu.c')
-          code = path.read_text()
-
-          before = 'GameInfo->name = "copyfami";'
-
-          after = (
-              'GameInfo->name = (uint8 *)malloc(sizeof("copyfami"));\n'
-              '\tif (!GameInfo->name) {\n'
-              '\t\tfree(GameInfo);\n'
-              '\t\tGameInfo = NULL;\n'
-              '\t\treturn NULL;\n'
-              '\t}\n'
-              '\tmemcpy(GameInfo->name, "copyfami", sizeof("copyfami"));'
-          )
-
-          if before in code:
-              code = code.replace(before, after, 1)
-              path.write_text(code)
-              print('CopyFami name allocation fixed.')
-          elif 'malloc(sizeof("copyfami"))' in code:
-              print('CopyFami already fixed.')
-          else:
-              raise RuntimeError('CopyFami assignment not found.')
-          PY
-
-      - name: Fix legacy network declarations
-        working-directory: FCEUmm-PS2-exFAT
-        run: |
-          python3 - <<'PYCODE'
-          from pathlib import Path
-          import re
-
-          definitions = {
-              'src/fceu.c': [
-                  'void FCEUD_NetworkClose(void);',
-              ],
-              'src/netplay.c': [
-                  'void FCEUD_NetworkClose(void);',
-                  'int FCEUD_SendData(void *data, uint32 len);',
-                  'int FCEUD_RecvData(void *data, uint32 len);',
-              ],
-          }
-
-          for filename, declarations in definitions.items():
-              path = Path(filename)
-              source = path.read_text()
-
-              missing = [
-                  item for item in declarations
-                  if item not in source
-              ]
-
-              if missing:
-                  match = re.search(
-                      r'^[ \t]*#[ \t]*include[ \t]+"netplay\.h"[^\n]*\n',
-                      source,
-                      re.MULTILINE
-                  )
-
-                  if not match:
-                      raise RuntimeError(
-                          f'Missing netplay.h include: {filename}'
-                      )
-
-                  source = (
-                      source[:match.end()]
-                      + '\n'.join(missing)
-                      + '\n'
-                      + source[match.end():]
-                  )
-
-                  path.write_text(source)
-
-              print(f'Network declarations verified: {filename}')
-          PYCODE
-
-      - name: Fix FDS audio declaration
-        working-directory: FCEUmm-PS2-exFAT
-        run: |
-          python3 - <<'PYCODE'
-          from pathlib import Path
-
-          path = Path('src/fds.c')
-          source = path.read_text()
-
-          old = 'void FDSSound();'
-          new = 'void FDSSound(int c);'
-
-          if old in source:
-              source = source.replace(old, new, 1)
-              path.write_text(source)
-              print('FDS audio declaration fixed.')
-          elif new in source:
-              print('FDS audio already fixed.')
-          else:
-              raise RuntimeError('FDS declaration not found.')
-          PYCODE
-
-      - name: Fix legacy asprintf availability
-        working-directory: FCEUmm-PS2-exFAT
-        run: |
-          python3 - <<'PYCODE'
-          from pathlib import Path
-
-          path = Path('Makefile.ps2')
-          source = path.read_text()
-
-          if '-DHAVE_ASPRINTF' not in source:
-              raise RuntimeError(
-                  'Expected HAVE_ASPRINTF flag not found.'
-              )
-
-          source = source.replace(
-              '-DHAVE_ASPRINTF',
-              '',
-              1
-          )
-
-          path.write_text(source)
-
-          general = Path('src/general.c').read_text()
-
-          if '#ifndef HAVE_ASPRINTF' not in general:
-              raise RuntimeError('Missing asprintf fallback.')
-
-          if 'static int asprintf(' not in general:
-              raise RuntimeError('Missing asprintf implementation.')
-
-          print('Built-in asprintf implementation enabled.')
-          PYCODE
-
-      - name: Fix duplicate zlib linker symbols
-        working-directory: FCEUmm-PS2-exFAT
-        run: |
-          python3 - <<'PYCODE'
-          from pathlib import Path
-
-          makefile = Path('Makefile.ps2')
-          source = makefile.read_text()
-
-          old_directories = (
-              'FCEU_SRC_DIRS := $(PS2_DIR) $(FCEU_DIR) '
-              '$(FCEU_DIR)/boards $(FCEU_DIR)/input  '
-              '$(FCEU_DIR)/mappers $(ZLIB_DIR)'
-          )
-
-          new_directories = old_directories.replace(
-              ' $(ZLIB_DIR)',
-              ''
-          )
-
-          old_sources = (
-              'FCEU_CSRCS := $(foreach dir,$(FCEU_SRC_DIRS),'
-              '$(wildcard $(dir)/*.c))'
-          )
-
-          new_sources = (
-              old_sources
-              + '\nFCEU_CSRCS += $(ZLIB_DIR)/unzip.c'
-          )
-
-          if source.count(old_directories) != 1:
-              raise RuntimeError(
-                  'Unexpected FCEU_SRC_DIRS layout'
-              )
-
-          if source.count(old_sources) != 1:
-              raise RuntimeError(
-                  'Unexpected FCEU_CSRCS layout'
-              )
-
-          if '-lz' not in source:
-              raise RuntimeError(
-                  'Missing PS2SDK zlib linker option'
-              )
-
-          source = source.replace(
-              old_directories,
-              new_directories,
-              1
-          )
-
-          source = source.replace(
-              old_sources,
-              new_sources,
-              1
-          )
-
-          makefile.write_text(source)
-
-          print('Using PS2SDK libz.')
-          print('Legacy ZIP reader preserved.')
-          PYCODE
-
-      - name: Restore stock USB drivers for boot diagnosis
-        working-directory: FCEUmm-PS2-exFAT
-        run: |
-          set -eu
-
-          test -s "$PS2SDK/iop/irx/usbd.irx"
-          test -s "$PS2SDK/iop/irx/usbhdfsd.irx"
-
-          python3 - <<'PY'
-          from pathlib import Path
-
-          makefile = Path('Makefile.ps2')
-          source = makefile.read_text()
-
-          changes = {
-              '$(PS2_DIR)/irx/usbd_irx.c: $(PS2_DIR)/irx/exfat/usbd.irx\n\tbin2c $< $@ usbd_irx':
-              '$(PS2_DIR)/irx/usbd_irx.c:\n\tbin2c $(IRX_DIR)/usbd.irx $(PS2_DIR)/irx/usbd_irx.c usbd_irx',
-
-              '$(PS2_DIR)/irx/usbhdfsd_irx.c: $(PS2_DIR)/irx/exfat/usbhdfsd.irx\n\tbin2c $< $@ usbhdfsd_irx':
-              '$(PS2_DIR)/irx/usbhdfsd_irx.c:\n\tbin2c $(IRX_DIR)/usbhdfsd.irx $(PS2_DIR)/irx/usbhdfsd_irx.c usbhdfsd_irx',
-          }
-
-          for old, new in changes.items():
-              if source.count(old) != 1:
-                  raise RuntimeError(
-                      'Expected exFAT driver rule not found.'
-                  )
-
-              source = source.replace(old, new, 1)
-
-          makefile.write_text(source)
-
-          init = Path('src/drivers/ps2/init.c')
-          source = init.read_text()
-
-          start = source.find(
-              '    /* The supplied usbd.irx is internally a BDM/FATFS module. */'
-          )
-
-          end = source.find(
-              '    for (i = 0; i < 3; i++)',
-              start
-          )
-
-          if start < 0 or end < 0:
-              raise RuntimeError(
-                  'Unexpected USB initialization block.'
-              )
-
-          source = (
-              source[:start]
-              + '    SifExecModuleBuffer(&usbd_irx, size_usbd_irx, 0, NULL, NULL);\n'
-              + '    SifExecModuleBuffer(&usbhdfsd_irx, size_usbhdfsd_irx, 0, NULL, NULL);\n'
-              + source[end:]
-          )
-
-          extra_init = (
-              '    {\n'
-              '        int filexio_rc = fileXioInit();\n'
-              '        printf("fileXio RPC initialization: %d\\n", filexio_rc);\n'
-              '    }\n'
-          )
-
-          if source.count(extra_init) != 1:
-              raise RuntimeError(
-                  'Expected fileXioInit block not found.'
-              )
-
-          source = source.replace(extra_init, '', 1)
-
-          source = source.replace(
-              '    int usb_module_rc, usb_module_result;\n',
-              '',
-              1
-          )
-
-          source = source.replace(
-              '#include <fileXio_rpc.h>\n',
-              '',
-              1
-          )
-
-          init.write_text(source)
-
-          print('Stock PS2SDK USB drivers restored.')
-          print('Original USB initialization sequence restored.')
-          PY
-
-      - name: Compile PS2 ELF
-        working-directory: FCEUmm-PS2-exFAT
+      - name: Compile original FCEUmm ELF
         shell: sh
         run: |
-          set -eu
-
-          if make -f Makefile.ps2 NOT_PACKED=1 -j1 > build.log 2>&1; then
-            echo "PS2 diagnostic build completed."
+          if make -f Makefile.ps2 fceu.elf > build.log 2>&1; then
+            echo "Original ELF compiled successfully."
             tail -n 50 build.log
           else
-            echo "PS2 diagnostic build failed."
-            echo "Compiler and linker errors:"
-
-            grep -n -m 40 -E 'fatal error:|error:|undefined reference|multiple definition|cannot find|No such file|Error [0-9]+' build.log || true
-
-            echo "Last 120 lines of the build log:"
-            tail -n 120 build.log
-
+            echo "Original build failed with the current PS2SDK."
+            grep -n -m 30 -E 'fatal error:|error:|undefined reference|multiple definition|cannot find|Error [0-9]+' build.log || true
+            tail -n 100 build.log
             exit 1
           fi
 
-      - name: Verify output and create diagnostic ELF
-        working-directory: FCEUmm-PS2-exFAT
+      - name: Pack original ELF if tool is available
         run: |
           set -eu
+          if command -v ps2-packer >/dev/null 2>&1; then
+            ps2-packer fceu.elf fceu-packed.elf
+            echo "Packed ELF created."
+          else
+            echo "ps2-packer is unavailable; the unpacked ELF is still preserved."
+          fi
+
+      - name: Verify source files were not edited
+        run: |
+          git diff --exit-code -- Makefile.ps2 src
           test -s fceu.elf
+          ls -lh fceu.elf
+          if test -s fceu-packed.elf; then ls -lh fceu-packed.elf; fi
 
-          python3 - <<'PY'
-          from pathlib import Path
-          import struct
-
-          path = Path('fceu.elf')
-          header = path.read_bytes()[:20]
-
-          assert header[:4] == b'\x7fELF', 'Not an ELF file.'
-          assert header[4] == 1, 'Expected ELF32.'
-          assert header[5] == 1, 'Expected little-endian ELF.'
-          assert struct.unpack_from('<H', header, 18)[0] == 8, 'Expected MIPS ELF.'
-
-          print(
-              f'Validated diagnostic ELF: {path.stat().st_size} bytes'
-          )
-          PY
-
-          cp fceu.elf Nes-FAT32-DIAGNOSTIC.ELF
-          ls -lh fceu.elf Nes-FAT32-DIAGNOSTIC.ELF
-
-      - name: Upload compilation log
+      - name: Upload original build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FCEUmm-PS2-FAT32-diagnostic-log
-          path: FCEUmm-PS2-exFAT/build.log
+          name: FCEUmm-original-build-log
+          path: build.log
           if-no-files-found: warn
-          retention-days: 30
 
-      - name: Upload diagnostic ELF
+      - name: Upload original PS2 ELF
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: FCEUmm-PS2-FAT32-DIAGNOSTIC
+          name: FCEUmm-original-0.3.3-ELF
           path: |
-            FCEUmm-PS2-exFAT/fceu.elf
-            FCEUmm-PS2-exFAT/Nes-FAT32-DIAGNOSTIC.ELF
+            fceu.elf
+            fceu-packed.elf
           if-no-files-found: error
-          retention-days: 30
+          
