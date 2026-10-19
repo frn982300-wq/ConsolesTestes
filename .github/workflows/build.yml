@@ -14,10 +14,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download FCEUmm
-        run: |
-          git clone --depth 1 https://github.com/libretro/fceumm.git fceumm
-          ls -la fceumm
+       - name: Download FCEUmm
+  run: |
+    apt-get update && apt-get install -y git
+    git clone --depth 1 https://github.com/libretro/fceumm.git fceumm
 
       - name: Build PS2
         run: |
