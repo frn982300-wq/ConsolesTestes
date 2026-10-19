@@ -1,5 +1,5 @@
 
-name: Beetle PCE Fast PS2 exFAT Detailed Diagnostic
+name: Beetle PCE Fast PS2 exFAT DEBUG V4
 
 on:
   push:
@@ -62,11 +62,12 @@ jobs:
           #include <sbv_patches.h>
           #include <iopheap.h>
           #include <fileXio_rpc.h>
+          #include <io_common.h>
           #include <stdio.h>
           #include <string.h>
-          #include <fcntl.h>
+          #include <ctype.h>
 
-          /* Diagnostic only. No PC Engine emulation. */
+          /* Read-only USB diagnostic. No ROM emulation. */
 
           typedef struct {
               char letter;
@@ -150,13 +151,10 @@ jobs:
                                   float y1 = (float)(y + row * scale);
 
                                   gsKit_prim_sprite(
-                                      gs,
-                                      x1,
-                                      y1,
+                                      gs, x1, y1,
                                       x1 + (float)scale,
                                       y1 + (float)scale,
-                                      1,
-                                      color
+                                      1, color
                                   );
                               }
                           }
@@ -167,84 +165,97 @@ jobs:
 
           extern unsigned char exfat_bdm_irx[];
           extern unsigned int size_exfat_bdm_irx;
-
           extern unsigned char exfat_usb_irx[];
           extern unsigned int size_exfat_usb_irx;
-
           extern unsigned char iomanx_irx[];
           extern unsigned int size_iomanx_irx;
-
           extern unsigned char filexio_irx[];
           extern unsigned int size_filexio_irx;
 
-          #define NOT_TESTED (-9999)
+          #define NA (-9999)
 
           typedef struct {
               const char *root;
-              const char *filename;
-              int root_handle;
-              int root_close;
-              int file_handle;
-              int read_count;
+              const char *file;
+              int dir_open;
+              int dir_items;
+              int dir_found;
+              int dir_last_rc;
+              int stat_rc;
+              int stat_size;
+              int file_open;
+              int seek_end;
+              int seek_start;
+              int bytes_read;
+              int seek_after;
               int file_close;
-          } UsbPathResult;
+              char first_file[32];
+              char sample[24];
+          } PathTest;
 
-          static UsbPathResult path_results[2] = {
+          static PathTest paths[2] = {
               {
-                  "mass:/",
-                  "mass:/PS2TEST.TXT",
-                  NOT_TESTED,
-                  NOT_TESTED,
-                  NOT_TESTED,
-                  NOT_TESTED,
-                  NOT_TESTED
+                  .root = "mass:/",
+                  .file = "mass:/PS2TEST.TXT"
               },
               {
-                  "mass0:/",
-                  "mass0:/PS2TEST.TXT",
-                  NOT_TESTED,
-                  NOT_TESTED,
-                  NOT_TESTED,
-                  NOT_TESTED,
-                  NOT_TESTED
+                  .root = "mass0:/",
+                  .file = "mass0:/PS2TEST.TXT"
               }
           };
 
           static int usb_phase = 0;
           static int usb_error = 0;
-          static int usb_module_bdm = NOT_TESTED;
-          static int usb_module_transport = NOT_TESTED;
-          static int usb_bdm_status = NOT_TESTED;
-          static int usb_transport_status = NOT_TESTED;
-          static int usb_ioman_status = NOT_TESTED;
-          static int usb_filexio_status = NOT_TESTED;
-          static int usb_rpc_status = NOT_TESTED;
+          static int usb_bdm_id = NA;
+          static int usb_usb_id = NA;
+          static int usb_bdm_status = NA;
+          static int usb_usb_status = NA;
+          static int usb_ioman_status = NA;
+          static int usb_filexio_status = NA;
+          static int usb_rpc_status = NA;
           static int usb_rpc_ready = 0;
-          static int usb_attempts = 0;
           static int usb_frames = 0;
+          static int diag_view = 0;
 
-          static void reset_path_results(void)
+          static iox_stat_t file_stat
+              __attribute__((aligned(64)));
+
+          static iox_dirent_t dir_entry
+              __attribute__((aligned(64)));
+
+          static unsigned char data_buffer[64]
+              __attribute__((aligned(64)));
+
+          static void clear_results(void)
           {
               int i;
 
               for (i = 0; i < 2; ++i) {
-                  path_results[i].root_handle = NOT_TESTED;
-                  path_results[i].root_close = NOT_TESTED;
-                  path_results[i].file_handle = NOT_TESTED;
-                  path_results[i].read_count = NOT_TESTED;
-                  path_results[i].file_close = NOT_TESTED;
+                  paths[i].dir_open = NA;
+                  paths[i].dir_items = 0;
+                  paths[i].dir_found = 0;
+                  paths[i].dir_last_rc = NA;
+                  paths[i].stat_rc = NA;
+                  paths[i].stat_size = NA;
+                  paths[i].file_open = NA;
+                  paths[i].seek_end = NA;
+                  paths[i].seek_start = NA;
+                  paths[i].bytes_read = NA;
+                  paths[i].seek_after = NA;
+                  paths[i].file_close = NA;
+                  paths[i].first_file[0] = 0;
+                  paths[i].sample[0] = 0;
               }
           }
 
           static void start_usb_stack(void)
           {
               int rc;
-              int status = 0;
+              int result = 0;
 
               usb_phase = -1;
               usb_error = 0;
-              usb_attempts = 0;
-              reset_path_results();
+              clear_results();
 
               SifLoadFileInit();
               SifInitIopHeap();
@@ -253,32 +264,28 @@ jobs:
               rc = SifExecModuleBuffer(
                   iomanx_irx,
                   size_iomanx_irx,
-                  0,
-                  NULL,
-                  &status
+                  0, NULL, &result
               );
 
-              usb_ioman_status = status;
+              usb_ioman_status = result;
 
-              if (rc < 0 || status < 0) {
-                  usb_error = rc < 0 ? rc : status;
+              if (rc < 0 || result < 0) {
+                  usb_error = rc < 0 ? rc : result;
                   return;
               }
 
-              status = 0;
+              result = 0;
 
               rc = SifExecModuleBuffer(
                   filexio_irx,
                   size_filexio_irx,
-                  0,
-                  NULL,
-                  &status
+                  0, NULL, &result
               );
 
-              usb_filexio_status = status;
+              usb_filexio_status = result;
 
-              if (rc < 0 || status < 0) {
-                  usb_error = rc < 0 ? rc : status;
+              if (rc < 0 || result < 0) {
+                  usb_error = rc < 0 ? rc : result;
                   return;
               }
 
@@ -290,107 +297,220 @@ jobs:
               }
 
               usb_rpc_ready = 1;
+              result = 0;
 
-              status = 0;
-
-              usb_module_bdm = SifExecModuleBuffer(
+              usb_bdm_id = SifExecModuleBuffer(
                   exfat_bdm_irx,
                   size_exfat_bdm_irx,
-                  0,
-                  NULL,
-                  &status
+                  0, NULL, &result
               );
 
-              usb_bdm_status = status;
+              usb_bdm_status = result;
 
-              if (usb_module_bdm < 0 || status < 0) {
-                  usb_error = usb_module_bdm < 0
-                      ? usb_module_bdm
-                      : status;
+              if (usb_bdm_id < 0 || result < 0) {
+                  usb_error = usb_bdm_id < 0
+                      ? usb_bdm_id : result;
                   return;
               }
 
-              status = 0;
+              result = 0;
 
-              usb_module_transport = SifExecModuleBuffer(
+              usb_usb_id = SifExecModuleBuffer(
                   exfat_usb_irx,
                   size_exfat_usb_irx,
-                  0,
-                  NULL,
-                  &status
+                  0, NULL, &result
               );
 
-              usb_transport_status = status;
+              usb_usb_status = result;
 
-              if (usb_module_transport < 0 || status < 0) {
-                  usb_error = usb_module_transport < 0
-                      ? usb_module_transport
-                      : status;
+              if (usb_usb_id < 0 || result < 0) {
+                  usb_error = usb_usb_id < 0
+                      ? usb_usb_id : result;
                   return;
               }
 
-              usb_frames = 0;
               usb_phase = 2;
+              usb_frames = 0;
           }
 
-          static void scan_paths(void)
+          static int name_matches(
+              const char *a,
+              const char *b
+          )
           {
-              int i;
-              int fd;
-              int handle;
-              int success = 0;
+              while (*a && *b) {
+                  if (
+                      toupper((unsigned char)*a) !=
+                      toupper((unsigned char)*b)
+                  ) {
+                      return 0;
+                  }
 
-              static char buffer[64]
-                  __attribute__((aligned(64)));
+                  ++a;
+                  ++b;
+              }
+
+              return *a == 0 && *b == 0;
+          }
+
+          static void diagnostic_scan(void)
+          {
+              int i, fd, dirfd, rc, n, request;
 
               if (!usb_rpc_ready)
                   return;
 
-              ++usb_attempts;
+              clear_results();
 
               for (i = 0; i < 2; ++i) {
-                  UsbPathResult *p = &path_results[i];
+                  PathTest *p = &paths[i];
 
-                  fd = fileXioDopen(p->root);
+                  dirfd = fileXioDopen(p->root);
+                  p->dir_open = dirfd;
 
-                  p->root_handle = fd;
-                  p->root_close = NOT_TESTED;
-                  p->file_handle = NOT_TESTED;
-                  p->read_count = NOT_TESTED;
-                  p->file_close = NOT_TESTED;
+                  if (dirfd >= 0) {
+                      for (n = 0; n < 32; ++n) {
+                          memset(
+                              &dir_entry,
+                              0,
+                              sizeof(dir_entry)
+                          );
 
-                  if (fd >= 0)
-                      p->root_close = fileXioDclose(fd);
+                          rc = fileXioDread(
+                              dirfd,
+                              &dir_entry
+                          );
 
-                  handle = fileXioOpen(
-                      p->filename,
-                      O_RDONLY
+                          p->dir_last_rc = rc;
+
+                          if (rc <= 0)
+                              break;
+
+                          ++p->dir_items;
+
+                          if (p->first_file[0] == 0) {
+                              strncpy(
+                                  p->first_file,
+                                  dir_entry.name,
+                                  sizeof(p->first_file) - 1
+                              );
+
+                              p->first_file[
+                                  sizeof(p->first_file) - 1
+                              ] = 0;
+                          }
+
+                          if (name_matches(
+                              dir_entry.name,
+                              "PS2TEST.TXT"
+                          )) {
+                              p->dir_found = 1;
+                          }
+                      }
+
+                      fileXioDclose(dirfd);
+                  }
+
+                  memset(
+                      &file_stat,
+                      0,
+                      sizeof(file_stat)
                   );
 
-                  p->file_handle = handle;
+                  p->stat_rc = fileXioGetStat(
+                      p->file,
+                      &file_stat
+                  );
 
-                  if (handle >= 0) {
-                      memset(
-                          buffer,
-                          0,
-                          sizeof(buffer)
-                      );
-
-                      p->read_count = fileXioRead(
-                          handle,
-                          buffer,
-                          sizeof(buffer)
-                      );
-
-                      p->file_close = fileXioClose(handle);
-
-                      if (p->read_count > 0)
-                          success = 1;
+                  if (p->stat_rc >= 0) {
+                      p->stat_size = (int)file_stat.size;
                   }
+
+                  fd = fileXioOpen(
+                      p->file,
+                      FIO_O_RDONLY
+                  );
+
+                  p->file_open = fd;
+
+                  if (fd < 0)
+                      continue;
+
+                  p->seek_end = fileXioLseek(
+                      fd,
+                      0,
+                      FIO_SEEK_END
+                  );
+
+                  p->seek_start = fileXioLseek(
+                      fd,
+                      0,
+                      FIO_SEEK_SET
+                  );
+
+                  memset(
+                      data_buffer,
+                      0,
+                      sizeof(data_buffer)
+                  );
+
+                  request = 27;
+
+                  if (
+                      p->stat_size > 0 &&
+                      p->stat_size < request
+                  ) {
+                      request = p->stat_size;
+                  }
+
+                  p->bytes_read = fileXioRead(
+                      fd,
+                      data_buffer,
+                      request
+                  );
+
+                  p->seek_after = fileXioLseek(
+                      fd,
+                      0,
+                      FIO_SEEK_CUR
+                  );
+
+                  if (p->bytes_read > 0) {
+                      int j;
+                      int limit = p->bytes_read;
+
+                      if (limit > 20)
+                          limit = 20;
+
+                      for (j = 0; j < limit; ++j) {
+                          char c = (char)data_buffer[j];
+
+                          p->sample[j] =
+                              (c >= 'a' && c <= 'z')
+                                  ? (char)(c - 32)
+                                  : c;
+
+                          if (!(
+                              (
+                                  p->sample[j] >= 'A' &&
+                                  p->sample[j] <= 'Z'
+                              ) || (
+                                  p->sample[j] >= '0' &&
+                                  p->sample[j] <= '9'
+                              ) ||
+                              p->sample[j] == ' '
+                          )) {
+                              p->sample[j] = ' ';
+                          }
+                      }
+
+                      p->sample[limit] = 0;
+                  }
+
+                  p->file_close = fileXioClose(fd);
               }
 
-              if (success || usb_attempts >= 15)
-                  usb_phase = 3;
+              usb_phase = 3;
           }
 
           static char pad_buffer[256]
@@ -408,14 +528,12 @@ jobs:
 
               io_module = SifLoadModule(
                   "rom0:XSIO2MAN",
-                  0,
-                  NULL
+                  0, NULL
               );
 
               pad_module = SifLoadModule(
                   "rom0:XPADMAN",
-                  0,
-                  NULL
+                  0, NULL
               );
 
               if (io_module < 0 || pad_module < 0)
@@ -431,7 +549,9 @@ jobs:
               return pad_opened;
           }
 
-          static unsigned int read_new_buttons(int *connected)
+          static unsigned int read_new_buttons(
+              int *connected
+          )
           {
               struct padButtonStatus status;
               unsigned int pressed;
@@ -528,16 +648,22 @@ jobs:
                       if (i == selected) {
                           gsKit_prim_sprite(
                               gs,
-                              60, y - 12,
-                              584, y + 39,
-                              1, panel
+                              60,
+                              y - 12,
+                              584,
+                              y + 39,
+                              1,
+                              panel
                           );
 
                           gsKit_prim_sprite(
                               gs,
-                              60, y - 12,
-                              67, y + 39,
-                              1, accent
+                              60,
+                              y - 12,
+                              67,
+                              y + 39,
+                              1,
+                              accent
                           );
                       }
 
@@ -558,134 +684,219 @@ jobs:
                   );
 
               } else if (page == 1) {
-                  char line[64];
+                  char line[80];
+
+                  PathTest *p = &paths[
+                      diag_view < 2 ? diag_view : 0
+                  ];
 
                   print_pixels(
-                      gs, 70, 155, 3,
-                      "EXFAT USB DIAGNOSTIC",
+                      gs, 65, 155, 3,
+                      "EXFAT USB DEBUG V4",
                       white
                   );
 
                   if (usb_phase == 0) {
                       print_pixels(
                           gs, 70, 201, 2,
-                          "PRESS X TO START",
+                          "PRESS X TO LOAD USB",
                           accent
                       );
-
                   } else if (usb_phase == 1) {
                       print_pixels(
                           gs, 70, 201, 2,
-                          "LOADING MODULES",
+                          "STARTING MODULES",
                           accent
                       );
-
+                  } else if (usb_phase == 2) {
+                      print_pixels(
+                          gs, 70, 201, 2,
+                          "WAITING FOR USB",
+                          accent
+                      );
                   } else if (usb_phase == -1) {
                       snprintf(
                           line,
                           sizeof(line),
-                          "MODULE ERROR: %d",
+                          "MODULE ERROR %d",
                           usb_error
                       );
 
                       print_pixels(
                           gs, 70, 201, 2,
+                          line, white
+                      );
+                  } else {
+                      print_pixels(
+                          gs, 70, 201, 2,
+                          "SCAN FINISHED",
+                          accent
+                      );
+                  }
+
+                  if (diag_view < 2) {
+                      snprintf(
                           line,
-                          white
+                          sizeof(line),
+                          "PATH %s",
+                          diag_view == 0
+                              ? "MASS"
+                              : "MASS0"
+                      );
+
+                      print_pixels(
+                          gs, 70, 229, 2,
+                          line, accent
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "DIR %d ITEMS %d FOUND %d",
+                          p->dir_open,
+                          p->dir_items,
+                          p->dir_found
+                      );
+
+                      print_pixels(
+                          gs, 70, 255, 2,
+                          line, white
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "STAT %d SIZE %d",
+                          p->stat_rc,
+                          p->stat_size
+                      );
+
+                      print_pixels(
+                          gs, 70, 281, 2,
+                          line, white
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "OPEN %d END %d START %d",
+                          p->file_open,
+                          p->seek_end,
+                          p->seek_start
+                      );
+
+                      print_pixels(
+                          gs, 70, 307, 2,
+                          line, white
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "READ %d POS %d CLOSE %d",
+                          p->bytes_read,
+                          p->seek_after,
+                          p->file_close
+                      );
+
+                      print_pixels(
+                          gs, 70, 333, 2,
+                          line, white
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "DATA %s",
+                          p->sample
+                      );
+
+                      print_pixels(
+                          gs, 70, 359, 2,
+                          line, accent
                       );
 
                   } else {
                       snprintf(
                           line,
                           sizeof(line),
-                          "SCAN %d / 15",
-                          usb_attempts
+                          "BDM ID %d RES %d",
+                          usb_bdm_id,
+                          usb_bdm_status
                       );
 
                       print_pixels(
-                          gs, 70, 201, 2,
+                          gs, 70, 229, 2,
+                          line, white
+                      );
+
+                      snprintf(
                           line,
-                          accent
+                          sizeof(line),
+                          "USB ID %d RES %d",
+                          usb_usb_id,
+                          usb_usb_status
+                      );
+
+                      print_pixels(
+                          gs, 70, 255, 2,
+                          line, white
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "IOMAN %d FILEXIO %d",
+                          usb_ioman_status,
+                          usb_filexio_status
+                      );
+
+                      print_pixels(
+                          gs, 70, 281, 2,
+                          line, white
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "RPC %d READY %d",
+                          usb_rpc_status,
+                          usb_rpc_ready
+                      );
+
+                      print_pixels(
+                          gs, 70, 307, 2,
+                          line, accent
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "MASS DREAD %d",
+                          paths[0].dir_last_rc
+                      );
+
+                      print_pixels(
+                          gs, 70, 333, 2,
+                          line, muted
+                      );
+
+                      snprintf(
+                          line,
+                          sizeof(line),
+                          "MASS0 DREAD %d",
+                          paths[1].dir_last_rc
+                      );
+
+                      print_pixels(
+                          gs, 70, 359, 2,
+                          line, muted
                       );
                   }
 
-                  snprintf(
-                      line,
-                      sizeof(line),
-                      "BDM ID:%d RES:%d",
-                      usb_module_bdm,
-                      usb_bdm_status
-                  );
-
                   print_pixels(
-                      gs, 70, 228, 2,
-                      line, muted
-                  );
-
-                  snprintf(
-                      line,
-                      sizeof(line),
-                      "USB ID:%d RES:%d",
-                      usb_module_transport,
-                      usb_transport_status
-                  );
-
-                  print_pixels(
-                      gs, 70, 253, 2,
-                      line, muted
-                  );
-
-                  snprintf(
-                      line,
-                      sizeof(line),
-                      "IX:%d FX:%d RPC:%d",
-                      usb_ioman_status,
-                      usb_filexio_status,
-                      usb_rpc_status
-                  );
-
-                  print_pixels(
-                      gs, 70, 280, 2,
-                      line, muted
-                  );
-
-                  print_pixels(
-                      gs, 70, 312, 2,
-                      "H:ROOT  O:OPEN  R:READ",
-                      accent
-                  );
-
-                  snprintf(
-                      line,
-                      sizeof(line),
-                      "MASS  H:%d O:%d R:%d",
-                      path_results[0].root_handle,
-                      path_results[0].file_handle,
-                      path_results[0].read_count
-                  );
-
-                  print_pixels(
-                      gs, 70, 340, 2,
-                      line, white
-                  );
-
-                  snprintf(
-                      line,
-                      sizeof(line),
-                      "MASS0 H:%d O:%d R:%d",
-                      path_results[1].root_handle,
-                      path_results[1].file_handle,
-                      path_results[1].read_count
-                  );
-
-                  print_pixels(
-                      gs, 70, 368, 2,
-                      line, white
-                  );
-
-                  print_pixels(
-                      gs, 70, 401, 2,
-                      "X RESCAN  O BACK",
+                      gs, 65, 399, 2,
+                      "LEFT RIGHT PAGE  X TEST  O BACK",
                       accent
                   );
 
@@ -735,7 +946,9 @@ jobs:
               }
 
               gsKit_prim_sprite(
-                  gs, 60, 431, 584, 433,
+                  gs,
+                  60, 431,
+                  584, 433,
                   1, panel
               );
 
@@ -751,9 +964,11 @@ jobs:
           int main(int argc, char **argv)
           {
               GSGLOBAL *gs;
+
               int selected = 0;
               int page = 0;
               int connected = 0;
+
               unsigned int new_buttons;
 
               (void)argc;
@@ -777,7 +992,10 @@ jobs:
                   1 << DMA_CHANNEL_GIF
               );
 
-              dmaKit_chan_init(DMA_CHANNEL_GIF);
+              dmaKit_chan_init(
+                  DMA_CHANNEL_GIF
+              );
+
               gsKit_init_screen(gs);
               gsKit_mode_switch(gs, GS_ONESHOT);
 
@@ -812,8 +1030,10 @@ jobs:
                           usb_phase = 1;
 
                           draw_menu(
-                              gs, selected,
-                              page, connected
+                              gs,
+                              selected,
+                              page,
+                              connected
                           );
 
                           gsKit_queue_exec(gs);
@@ -823,18 +1043,34 @@ jobs:
 
                       } else {
                           usb_phase = 2;
-                          usb_attempts = 0;
                           usb_frames = 0;
-                          reset_path_results();
+                          clear_results();
                       }
                   }
 
-                  if (page == 1 && usb_phase == 2) {
+                  if (
+                      page == 1 &&
+                      (new_buttons & PAD_LEFT)
+                  ) {
+                      diag_view = (diag_view + 2) % 3;
+                  }
+
+                  if (
+                      page == 1 &&
+                      (new_buttons & PAD_RIGHT)
+                  ) {
+                      diag_view = (diag_view + 1) % 3;
+                  }
+
+                  if (
+                      page == 1 &&
+                      usb_phase == 2
+                  ) {
                       ++usb_frames;
 
-                      if (usb_frames >= 50) {
+                      if (usb_frames >= 60) {
                           usb_frames = 0;
-                          scan_paths();
+                          diagnostic_scan();
                       }
                   }
 
@@ -854,7 +1090,7 @@ jobs:
           END_PS2_SOURCE
 
           cat > exfat-menu-test/Makefile <<'END_PS2_MAKEFILE'
-          EE_BIN = Beetle-PCE-Fast-EXFAT-DEBUG.ELF
+          EE_BIN = Beetle-PCE-Fast-EXFAT-DEBUG-V4.ELF
           EE_OBJS = menu_test.o exfat_bdm.o exfat_usb.o iomanx.o filexio.o
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
           EE_INCS += -I$(GSKIT)/include
@@ -887,35 +1123,37 @@ jobs:
 
           echo "Four IOP modules embedded."
 
-      - name: Compile PS2 diagnostic ELF
+      - name: Compile PlayStation 2 diagnostic ELF
         working-directory: exfat-menu-test
         shell: sh
         run: |
           if make -j2 > build.log 2>&1; then
-            ls -lh Beetle-PCE-Fast-EXFAT-DEBUG.ELF
+            ls -lh Beetle-PCE-Fast-EXFAT-DEBUG-V4.ELF
           else
-            echo "Build failed:"
+            echo "Build error:"
+
             grep -n -m 30 -E \
               'error:|undefined reference|No such file|cannot find' \
               build.log || true
+
             tail -n 100 build.log
             exit 1
           fi
 
-      - name: Verify PS2 ELF
+      - name: Verify PS2 ELF header
         working-directory: exfat-menu-test
         run: |
           python3 - <<'PYCODE'
           from pathlib import Path
           import struct
 
-          path = Path('Beetle-PCE-Fast-EXFAT-DEBUG.ELF')
-          header = path.read_bytes()[:20]
+          path = Path('Beetle-PCE-Fast-EXFAT-DEBUG-V4.ELF')
+          b = path.read_bytes()[:20]
 
-          assert header[:4] == b'\x7fELF'
-          assert header[4] == 1
-          assert header[5] == 1
-          assert struct.unpack_from('<H', header, 18)[0] == 8
+          assert b[:4] == b'\x7fELF'
+          assert b[4] == 1
+          assert b[5] == 1
+          assert struct.unpack_from('<H', b, 18)[0] == 8
 
           print(
               'Valid MIPS ELF:',
@@ -928,14 +1166,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-exFAT-debug-build-log
+          name: Beetle-exFAT-V4-build-log
           path: exfat-menu-test/build.log
           if-no-files-found: warn
 
-      - name: Upload diagnostic ELF
+      - name: Upload exFAT test ELF
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-PCE-Fast-PS2-EXFAT-DEBUG
-          path: exfat-menu-test/Beetle-PCE-Fast-EXFAT-DEBUG.ELF
+          name: Beetle-PCE-Fast-PS2-EXFAT-DEBUG-V4
+          path: exfat-menu-test/Beetle-PCE-Fast-EXFAT-DEBUG-V4.ELF
           if-no-files-found: error
