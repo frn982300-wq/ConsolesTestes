@@ -11,9 +11,9 @@ permissions:
 
 jobs:
   build:
-    name: Build PS2 ELF
+    name: Compile PS2 ELF with exFAT drivers
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     container:
       image: ps2dev/ps2dev:latest
@@ -22,194 +22,129 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build utilities
-        run: |
-          apk add --no-cache make git unzip python3 build-base
-
-      - name: Extract source package
+      - name: Install build dependencies
         run: |
           set -eu
-          test -s FCEUmm-PS2-exFAT-source.zip
-          unzip -q FCEUmm-PS2-exFAT-source.zip
+          apk add --no-cache make unzip python3 build-base binutils
+
+      - name: Extract integrated FCEUmm source
+        run: |
+          set -eu
+          test -s FCEUmm-PS2-exFAT-integrated-2026.zip
+          unzip -q FCEUmm-PS2-exFAT-integrated-2026.zip
           test -f FCEUmm-PS2-exFAT/Makefile.ps2
           test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx
           test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx
-          echo "Source files extracted successfully"
+          echo "Integrated source package extracted."
 
       - name: Verify PS2 toolchain
         run: |
           set -eu
+          test -n "${PS2SDK:-}"
+          test -n "${GSKIT:-}"
           test -d "$PS2SDK"
           test -d "$GSKIT"
           command -v mips64r5900el-ps2-elf-gcc
           command -v bin2c
+          command -v make
+          mips64r5900el-ps2-elf-gcc --version | head -n 1
 
-      - name: Patch legacy PS2SDK source
+      - name: Verify compatibility patches and embedded drivers
+        working-directory: FCEUmm-PS2-exFAT
+        run: |
+          set -eu
+          grep -q -- '-DNEWLIB_PORT_AWARE' Makefile.ps2
+          grep -q -- '-fcommon' Makefile.ps2
+          grep -q 'NOT_PACKED' Makefile.ps2
+          grep -q 'irx/exfat/usbd.irx' Makefile.ps2
+          grep -q 'irx/exfat/usbhdfsd.irx' Makefile.ps2
+          grep -q 'io_dirent_t buf;' src/drivers/ps2/browser.c
+          grep -q '#include <stdlib.h>' src/drivers/ps2/cnfsettings.c
+          grep -q 'fileXioInit()' src/drivers/ps2/init.c
+          grep -q 'gsKit_texture_jpeg(' src/drivers/ps2/main.c
+          grep -q '#include <malloc.h>' src/drivers/ps2/main.c
+          grep -q '#include <stdlib.h>' src/drivers/ps2/ps2font.c
+          grep -q '#include <string.h>' src/drivers/ps2/menu.c
+          echo "Source patches and exFAT driver files are present."
+
+      - name: Fix CopyFami name ownership
         working-directory: FCEUmm-PS2-exFAT
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          makefile = Path('Makefile.ps2')
-          lines = makefile.read_text().splitlines(keepends=True)
-          found = False
-
-          for index, line in enumerate(lines):
-              if line.startswith('PLATFORM_DEFINES ='):
-                  if '-DNEWLIB_PORT_AWARE' not in line:
-                      lines[index] = line.rstrip('\n') + ' -DNEWLIB_PORT_AWARE\n'
-                  found = True
-                  break
-
-          if not found:
-              raise RuntimeError('PLATFORM_DEFINES was not found')
-
-          makefile.write_text(''.join(lines))
-
-          browser = Path('src/drivers/ps2/browser.c')
-          source = browser.read_text()
-
-          if 'fio_dirent_t buf;' not in source:
-              raise RuntimeError('Legacy directory type was not found')
-
-          source = source.replace(
-              'fio_dirent_t buf;',
-              'io_dirent_t buf;',
-              1
-          )
-          browser.write_text(source)
-
-          config = Path('src/drivers/ps2/cnfsettings.c')
-          source = config.read_text()
-
-          for declaration in ('int true = 1;\n', 'int false = 0;\n'):
-              if declaration not in source:
-                  raise RuntimeError('Legacy Boolean declaration not found')
-              source = source.replace(declaration, '', 1)
-
-          source = source.replace(
-              "(tp!='\\0')",
-              "(*tp!='\\0')"
-          )
-
-          for header in ('<stdlib.h>', '<fileio.h>', '<sys/fcntl.h>'):
-              if '#include ' + header not in source:
-                  source = '#include ' + header + '\n' + source
-
-          config.write_text(source)
-
-          main = Path('src/drivers/ps2/main.c')
-          source = main.read_text()
-
-          if source.count('#include <libjpg.h>') != 1:
-              raise RuntimeError('Legacy JPEG header was not found')
-
-          source = source.replace('#include <libjpg.h>\n', '', 1)
-
-          if '#include <stdlib.h>' not in source:
-              source = '#include <stdlib.h>\n' + source
-
-          if '#include <malloc.h>' not in source:
-              source = '#include <malloc.h>\n' + source
-
-          start = source.find('    // Setup GUI Textures\n')
-          end = source.find(
-              '    if (!(ret = FCEUI_Initialize()))',
-              start
-          )
-
-          if start == -1 or end == -1 or 'jpgOpenFILE' not in source[start:end]:
-              raise RuntimeError('Legacy JPEG loading section was not found')
-
-          replacement = '''    // Setup GUI Textures
-              if (strstr(FCEUSkin.bgTexture, ".png") != NULL) {
-                  if (gsKit_texture_png(gsGlobal, &BG_TEX, FCEUSkin.bgTexture) < 0) {
-                      printf("Error loading browser background PNG!\\n");
-                      bgtex = 1;
-                  }
-              } else if (strstr(FCEUSkin.bgTexture, ".jpg") != NULL ||
-                         strstr(FCEUSkin.bgTexture, ".jpeg") != NULL) {
-                  if (gsKit_texture_jpeg(gsGlobal, &BG_TEX, FCEUSkin.bgTexture) < 0) {
-                      printf("Error loading browser background JPEG!\\n");
-                      bgtex = 1;
-                  }
-              } else {
-                  bgtex = 1;
-              }
-
-              if (strstr(FCEUSkin.bgMenu, ".png") != NULL) {
-                  if (gsKit_texture_png(gsGlobal, &MENU_TEX, FCEUSkin.bgMenu) < 0) {
-                      printf("Error loading menu background PNG!\\n");
-                      menutex = 1;
-                  }
-              } else if (strstr(FCEUSkin.bgMenu, ".jpg") != NULL ||
-                         strstr(FCEUSkin.bgMenu, ".jpeg") != NULL) {
-                  if (gsKit_texture_jpeg(gsGlobal, &MENU_TEX, FCEUSkin.bgMenu) < 0) {
-                      printf("Error loading menu background JPEG!\\n");
-                      menutex = 1;
-                  }
-              } else {
-                  menutex = 1;
-              }
-
-          '''
-
-          source = source[:start] + replacement + source[end:]
-
-          if 'jpgOpenFILE' in source or '#include <libjpg.h>' in source:
-              raise RuntimeError('Legacy JPEG calls still remain')
-
-          main.write_text(source)
-
-          font = Path('src/drivers/ps2/ps2font.c')
-          source = font.read_text()
-
-          if '#include <stdlib.h>' not in source:
-              source = '#include <stdlib.h>\n' + source
-
-          font.write_text(source)
-
-          menu = Path('src/drivers/ps2/menu.c')
-          source = menu.read_text()
-
-          if '#include <string.h>' not in source:
-              source = '#include <string.h>\n' + source
-
-          menu.write_text(source)
-
-          print('PS2SDK, JPEG, memory and menu patches applied')
+          path = Path('src/fceu.c')
+          code = path.read_text()
+          before = 'GameInfo->name = "copyfami";'
+          after = ('GameInfo->name = (uint8 *)malloc(sizeof("copyfami"));\n'
+                   '\tif (!GameInfo->name) {\n'
+                   '\t\tfree(GameInfo);\n'
+                   '\t\tGameInfo = NULL;\n'
+                   '\t\treturn NULL;\n'
+                   '\t}\n'
+                   '\tmemcpy(GameInfo->name, "copyfami", sizeof("copyfami"));')
+          if before in code:
+              code = code.replace(before, after, 1)
+              path.write_text(code)
+              print('CopyFami name allocation fixed.')
+          elif 'malloc(sizeof("copyfami"))' in code:
+              print('CopyFami name allocation already fixed.')
+          else:
+              raise RuntimeError('Expected CopyFami assignment not found.')
           PY
 
-      - name: Build PS2 ELF
+      - name: Compile PS2 ELF
         working-directory: FCEUmm-PS2-exFAT
         shell: sh
         run: |
+          set -eu
           if make -f Makefile.ps2 NOT_PACKED=1 -j1 > build.log 2>&1; then
-            tail -n 40 build.log
+            echo "PS2 build completed."
+            tail -n 50 build.log
           else
-            echo "Build failed. Relevant compiler messages:"
-            grep -n -E 'error:|undefined reference|No such file|Error [0-9]+' build.log || true
-            echo "Last 160 lines of build log:"
-            tail -n 160 build.log
+            echo "PS2 build failed. First compiler or linker errors:"
+            grep -n -m 40 -E 'fatal error:|error:|undefined reference|No such file|Error [0-9]+' build.log || true
+            echo "Last 120 lines of the build log:"
+            tail -n 120 build.log
             exit 1
           fi
 
-      - name: Verify ELF output
+      - name: Verify output and create named ELF
+        working-directory: FCEUmm-PS2-exFAT
         run: |
-          test -s FCEUmm-PS2-exFAT/fceu.elf
-          ls -lh FCEUmm-PS2-exFAT/fceu.elf
+          set -eu
+          test -s fceu.elf
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
 
-      - name: Upload build logs
+          path = Path('fceu.elf')
+          header = path.read_bytes()[:20]
+          assert header[:4] == b'\x7fELF', 'Output is not an ELF.'
+          assert header[4] == 1, 'Expected ELF32.'
+          assert header[5] == 1, 'Expected little-endian ELF.'
+          assert struct.unpack_from('<H', header, 18)[0] == 8, 'Expected MIPS ELF.'
+          print(f'Validated PS2 MIPS ELF: {path.stat().st_size} bytes')
+          PY
+          cp fceu.elf Nes.ELF
+          ls -lh fceu.elf Nes.ELF
+
+      - name: Upload full compilation log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: FCEUmm-PS2-build-log
           path: FCEUmm-PS2-exFAT/build.log
           if-no-files-found: warn
+          retention-days: 30
 
-      - name: Upload ELF
+      - name: Upload PS2 ELF executable
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: FCEUmm-PS2-exFAT-ELF
-          path: FCEUmm-PS2-exFAT/fceu.elf
+          path: |
+            FCEUmm-PS2-exFAT/fceu.elf
+            FCEUmm-PS2-exFAT/Nes.ELF
           if-no-files-found: error
+          retention-days: 30
