@@ -1,5 +1,5 @@
 
-name: Build Original FCEUmm PS2 0.3.3
+name: PS2 Beetle PCE Fast Menu Test
 
 on:
   push:
@@ -11,75 +11,305 @@ permissions:
 
 jobs:
   build:
-    name: Compile unmodified official PS2 source
+    name: Build standalone PS2 video menu test
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 20
 
     container:
       image: ps2dev/ps2dev:latest
 
     steps:
-      - name: Checkout workflow repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build utilities
+      - name: Install build tools
         run: |
-          set -eu
-          apk add --no-cache git make build-base
+          apk add --no-cache make build-base python3
 
-      - name: Download official FCEUmm PS2 v0.3.3 source
-        run: |
-          set -eu
-          git clone --depth 1 --branch v0.3.3 \
-            https://github.com/ps2homebrew/Fceumm-PS2.git \
-            original-fceumm
-
-          test -f original-fceumm/Makefile.ps2
-          test -f original-fceumm/src/drivers/ps2/init.c
-
-          echo "Official v0.3.3 source downloaded successfully."
-          git -C original-fceumm describe --tags --always
-
-      - name: Verify PS2 toolchain
-        run: |
-          set -eu
-          test -d "$PS2SDK"
-          test -d "$GSKIT"
-
-          command -v mips64r5900el-ps2-elf-gcc
-          command -v bin2c
-          command -v make
-
-          echo "Original source will not be patched."
-
-      - name: Compile original ELF without source changes
-        working-directory: original-fceumm
+      - name: Generate independent PS2 test source
         shell: sh
         run: |
-          if make -f Makefile.ps2 fceu.elf > build.log 2>&1; then
-            echo "Original source compilation succeeded."
-            ls -lh fceu.elf
-          else
-            echo "Original source is not compatible with the current toolchain as-is."
+          mkdir -p ps2-menu-test
 
-            grep -n -m 40 -E 'fatal error:|error:|undefined reference|multiple definition|cannot find|No such file|Error [0-9]+' build.log || true
+          cat > ps2-menu-test/menu_test.c <<'END_PS2_C_SOURCE'
+          /* Minimal PlayStation 2 video boot diagnostic. */
+          /* NOT a Beetle PCE Fast emulator port. */
+          /* No games, ROM loading or USB initialization. */
 
-            tail -n 120 build.log
+          #include <gsKit.h>
+          #include <dmaKit.h>
+          #include <stddef.h>
+
+          typedef struct {
+              char letter;
+              const char *rows[7];
+          } FontGlyph;
+
+          static const FontGlyph kFont[] = {
+              {'A', {".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"}},
+              {'B', {"####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."}},
+              {'C', {".####", "#....", "#....", "#....", "#....", "#....", ".####"}},
+              {'D', {"####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."}},
+              {'E', {"#####", "#....", "#....", "####.", "#....", "#....", "#####"}},
+              {'F', {"#####", "#....", "#....", "####.", "#....", "#....", "#...."}},
+              {'G', {".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."}},
+              {'H', {"#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"}},
+              {'I', {"#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"}},
+              {'J', {"..###", "...#.", "...#.", "...#.", "#..#.", "#..#.", ".##.."}},
+              {'K', {"#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"}},
+              {'L', {"#....", "#....", "#....", "#....", "#....", "#....", "#####"}},
+              {'M', {"#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"}},
+              {'N', {"#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"}},
+              {'O', {".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."}},
+              {'P', {"####.", "#...#", "#...#", "####.", "#....", "#....", "#...."}},
+              {'Q', {".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"}},
+              {'R', {"####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"}},
+              {'S', {".####", "#....", "#....", ".###.", "....#", "....#", "####."}},
+              {'T', {"#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."}},
+              {'U', {"#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."}},
+              {'V', {"#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."}},
+              {'W', {"#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"}},
+              {'X', {"#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"}},
+              {'Y', {"#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."}},
+              {'Z', {"#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"}},
+              {'0', {".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."}},
+              {'1', {"..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."}},
+              {'2', {".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"}},
+              {'3', {"####.", "....#", "....#", ".###.", "....#", "....#", "####."}},
+              {'4', {"...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."}},
+              {'5', {"#####", "#....", "#....", "####.", "....#", "....#", "####."}},
+              {'6', {".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."}},
+              {'7', {"#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."}},
+              {'8', {".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."}},
+              {'9', {".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."}},
+              {'-', {".....", ".....", ".....", "#####", ".....", ".....", "....."}},
+              {'/', {"....#", "....#", "...#.", "..#..", ".#...", "#....", "#...."}},
+              {':', {".....", "..#..", "..#..", ".....", "..#..", "..#..", "....."}},
+              {'.', {".....", ".....", ".....", ".....", ".....", ".##..", ".##.."}},
+          };
+
+          static const FontGlyph *find_glyph(char c)
+          {
+              unsigned int i;
+
+              for (i = 0; i < sizeof(kFont) / sizeof(kFont[0]); ++i) {
+                  if (kFont[i].letter == c) {
+                      return &kFont[i];
+                  }
+              }
+
+              return NULL;
+          }
+
+          static void print_pixels(
+              GSGLOBAL *gs,
+              int x,
+              int y,
+              int scale,
+              const char *message,
+              u64 color
+          )
+          {
+              int i;
+              int row;
+              int col;
+
+              for (i = 0; message[i] != '\0'; ++i) {
+                  const FontGlyph *glyph = find_glyph(message[i]);
+
+                  if (glyph != NULL) {
+                      for (row = 0; row < 7; ++row) {
+                          for (col = 0; col < 5; ++col) {
+                              if (glyph->rows[row][col] == '#') {
+                                  float x1 = (float)(x + (i * 6 + col) * scale);
+                                  float y1 = (float)(y + row * scale);
+
+                                  gsKit_prim_sprite(
+                                      gs,
+                                      x1,
+                                      y1,
+                                      x1 + (float)scale,
+                                      y1 + (float)scale,
+                                      1,
+                                      color
+                                  );
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          int main(int argc, char **argv)
+          {
+              GSGLOBAL *gs;
+              u64 background;
+              u64 panel;
+              u64 accent;
+              u64 text;
+              u64 muted;
+
+              (void)argc;
+              (void)argv;
+
+              gs = gsKit_init_global();
+
+              if (gs == NULL) {
+                  return 1;
+              }
+
+              gs->PSM = GS_PSM_CT16;
+              gs->PSMZ = GS_PSMZ_16;
+              gs->ZBuffering = GS_SETTING_OFF;
+
+              dmaKit_init(
+                  D_CTRL_RELE_OFF,
+                  D_CTRL_MFD_OFF,
+                  D_CTRL_STS_UNSPEC,
+                  D_CTRL_STD_OFF,
+                  D_CTRL_RCYC_8,
+                  1 << DMA_CHANNEL_GIF
+              );
+
+              dmaKit_chan_init(DMA_CHANNEL_GIF);
+
+              gsKit_init_screen(gs);
+              gsKit_mode_switch(gs, GS_PERSISTENT);
+
+              background = GS_SETREG_RGBAQ(12, 20, 35, 0x80, 0);
+              panel = GS_SETREG_RGBAQ(29, 46, 63, 0x80, 0);
+              accent = GS_SETREG_RGBAQ(56, 218, 186, 0x80, 0);
+              text = GS_SETREG_RGBAQ(236, 243, 249, 0x80, 0);
+              muted = GS_SETREG_RGBAQ(156, 179, 195, 0x80, 0);
+
+              gsKit_clear(gs, background);
+
+              gsKit_prim_sprite(
+                  gs, 48, 43, 58, 141, 1, accent
+              );
+
+              print_pixels(
+                  gs, 76, 60, 3,
+                  "BEETLE PCE FAST",
+                  text
+              );
+
+              print_pixels(
+                  gs, 77, 106, 2,
+                  "PS2 VIDEO BOOT TEST",
+                  accent
+              );
+
+              gsKit_prim_sprite(
+                  gs, 48, 155, 592, 220, 1, panel
+              );
+
+              gsKit_prim_sprite(
+                  gs, 48, 155, 53, 220, 1, accent
+              );
+
+              print_pixels(
+                  gs, 77, 177, 3,
+                  "VIDEO INITIALIZED",
+                  text
+              );
+
+              print_pixels(
+                  gs, 79, 258, 2,
+                  "CORE NOT PORTED",
+                  muted
+              );
+
+              print_pixels(
+                  gs, 79, 296, 2,
+                  "ROM LOADING DISABLED",
+                  muted
+              );
+
+              print_pixels(
+                  gs, 79, 334, 2,
+                  "FAT32 / EXFAT NOT TESTED",
+                  muted
+              );
+
+              gsKit_prim_sprite(
+                  gs, 48, 387, 592, 389, 1, panel
+              );
+
+              print_pixels(
+                  gs, 65, 405, 2,
+                  "IF YOU SEE THIS MENU THE ELF STARTED",
+                  accent
+              );
+
+              while (1) {
+                  gsKit_queue_exec(gs);
+                  gsKit_sync_flip(gs);
+              }
+
+              return 0;
+          }
+          END_PS2_C_SOURCE
+
+          cat > ps2-menu-test/Makefile <<'END_PS2_MAKEFILE'
+          EE_BIN = Beetle-PCE-Fast-MENU-TEST.ELF
+          EE_OBJS = menu_test.o
+          EE_CFLAGS += -O2 -G0 -Wall
+          EE_LIBS += -lgskit -ldmakit -lm
+
+          all: $(EE_BIN)
+
+          clean:
+          	rm -f $(EE_BIN) $(EE_OBJS)
+
+          include $(GSKIT)/Makefile.pref
+          include $(PS2SDK)/samples/Makefile.eeglobal
+          include $(GSKIT)/Makefile.global
+          END_PS2_MAKEFILE
+
+      - name: Compile PlayStation 2 menu ELF
+        working-directory: ps2-menu-test
+        shell: sh
+        run: |
+          set -eu
+
+          make -j2 > build.log 2>&1 || {
+            echo "Build failed. Compiler output follows:"
+            cat build.log
             exit 1
-          fi
+          }
+
+          ls -lh Beetle-PCE-Fast-MENU-TEST.ELF
+
+      - name: Check MIPS ELF format
+        working-directory: ps2-menu-test
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import struct
+
+          p = pathlib.Path('Beetle-PCE-Fast-MENU-TEST.ELF')
+          data = p.read_bytes()[:20]
+
+          assert data[:4] == b'\x7fELF', 'ELF signature missing'
+          assert data[4] == 1 and data[5] == 1, 'Expected ELF32 little-endian'
+          assert struct.unpack_from('<H', data, 18)[0] == 8, 'Expected MIPS ELF'
+
+          print(f'PS2 MIPS ELF validated: {p.stat().st_size} bytes')
+          PY
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: original-v033-build-log
-          path: original-fceumm/build.log
+          name: ps2-menu-test-log
+          path: ps2-menu-test/build.log
           if-no-files-found: warn
 
-      - name: Upload original compiled ELF
+      - name: Upload PS2 menu ELF
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: original-v033-fceu-elf
-          path: original-fceumm/fceu.elf
+          name: Beetle-PCE-Fast-PS2-MENU-TEST
+          path: ps2-menu-test/Beetle-PCE-Fast-MENU-TEST.ELF
           if-no-files-found: error
