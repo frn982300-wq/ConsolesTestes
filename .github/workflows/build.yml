@@ -34,7 +34,7 @@ jobs:
           test -f FCEUmm-PS2-exFAT/Makefile.ps2
           test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx
           test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx
-          echo "Source package extracted successfully"
+          echo "Source files extracted successfully"
 
       - name: Verify PS2 toolchain
         run: |
@@ -44,6 +44,13 @@ jobs:
           test -d "$GSKIT"
           command -v mips64r5900el-ps2-elf-gcc
           command -v bin2c
+
+      - name: Enable PS2SDK legacy compatibility
+        working-directory: FCEUmm-PS2-exFAT
+        run: |
+          sed -i '/^PLATFORM_DEFINES = /s/$/ -DNEWLIB_PORT_AWARE/' Makefile.ps2
+          grep -q 'DNEWLIB_PORT_AWARE' Makefile.ps2
+          echo "Legacy PS2SDK compatibility enabled"
 
       - name: Build PS2 ELF
         working-directory: FCEUmm-PS2-exFAT
