@@ -1,9 +1,10 @@
 
-name: Build FCEUmm PS2
+name: Build FCEUmm PS2 exFAT
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -11,6 +12,7 @@ permissions:
 
 jobs:
   build:
+    name: Build PS2 ELF
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -21,40 +23,55 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build utilities
         run: |
-          apk add --no-cache git make build-base
+          apk add --no-cache make git unzip python3 build-base
+
+      - name: Extract source package
+        run: |
+          test -f FCEUmm-PS2-exFAT-source.zip
+          unzip -q FCEUmm-PS2-exFAT-source.zip
+          test -f FCEUmm-PS2-exFAT/Makefile.ps2
+          test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx
+          test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx
+          echo "Source package extracted successfully"
 
       - name: Verify PS2 toolchain
         run: |
-          echo "Checking PS2 development tools..."
-          command -v mips64r5900el-ps2-elf-gcc
-          command -v make
+          echo "PS2SDK=$PS2SDK"
+          echo "GSKIT=$GSKIT"
           test -d "$PS2SDK"
           test -d "$GSKIT"
-
-      - name: Download FCEUmm PS2
-        run: |
-          git clone --depth 1 \
-            https://github.com/ps2homebrew/Fceumm-PS2.git \
-            fceumm-ps2
-          test -f fceumm-ps2/Makefile
-          echo "Source code downloaded successfully!"
+          command -v mips64r5900el-ps2-elf-gcc
+          command -v bin2c
 
       - name: Build PS2 ELF
-        working-directory: fceumm-ps2
+        working-directory: FCEUmm-PS2-exFAT
+        shell: sh
         run: |
-          make NOT_PACKED=1 -j2
+          set -eu
+          make -f Makefile.ps2 NOT_PACKED=1 -j1 > build.log 2>&1 || {
+            cat build.log
+            exit 1
+          }
+          tail -n 40 build.log
 
-      - name: Verify ELF
+      - name: Verify ELF output
         run: |
-          test -s fceumm-ps2/fceu.elf
-          ls -lh fceumm-ps2/fceu.elf
-          echo "ELF build completed successfully!"
+          test -s FCEUmm-PS2-exFAT/fceu.elf
+          ls -lh FCEUmm-PS2-exFAT/fceu.elf
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FCEUmm-PS2-build-log
+          path: FCEUmm-PS2-exFAT/build.log
+          if-no-files-found: warn
 
       - name: Upload ELF
         uses: actions/upload-artifact@v4
         with:
-          name: FCEUmm-PS2-ELF
-          path: fceumm-ps2/fceu.elf
+          name: FCEUmm-PS2-exFAT-ELF
+          path: FCEUmm-PS2-exFAT/fceu.elf
           if-no-files-found: error
