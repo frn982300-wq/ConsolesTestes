@@ -1,39 +1,68 @@
-name: Build PS2
+
+name: Build FCEUmm PS2
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  construir:
+  build:
+    name: Build FCEUmm for PlayStation 2
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     container:
       image: ps2dev/ps2dev:latest
-    timeout-minutes: 15
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download FCEUmm
+      - name: Install dependencies
         run: |
-          apt-get update && apt-get install -y git
-          git clone --depth 1 https://github.com/libretro/fceumm.git fceumm
+          apk add --no-cache git make build-base
 
-      - name: Build PS2
+      - name: Verify PS2 development environment
         run: |
-          cd fceumm
-          make -f Makefile.libretro platform=ps2
+          echo "PS2DEV=$PS2DEV"
+          echo "PS2SDK=$PS2SDK"
+          echo "GSKIT=$GSKIT"
 
-      - name: Find ELF
+          command -v mips64r5900el-ps2-elf-gcc
+          command -v make
+
+          test -d "$PS2SDK"
+          test -d "$GSKIT"
+
+      - name: Clone FCEUmm PS2 repository
         run: |
-          find . -name "*.elf" -o -name "*.ELF"
-          ls -lh fceumm/*.elf || ls -lh *.elf
+          git clone --depth 1 \
+            https://github.com/ps2homebrew/Fceumm-PS2.git \
+            fceumm-ps2
 
-      - name: Upload ELF
+          ls -la fceumm-ps2
+
+      - name: Build PS2 ELF
+        working-directory: fceumm-ps2
+        run: |
+          make NOT_PACKED=1 -j2
+
+      - name: Verify ELF output
+        run: |
+          test -s fceumm-ps2/fceu.elf
+          ls -lh fceumm-ps2/fceu.elf
+          echo "ELF file generated successfully!"
+
+      - name: Upload PS2 ELF artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fceumm-ps2
-          path: |
-            fceumm/*.elf
-            *.elf
+          name: FCEUmm-PS2-ELF
+          path: fceumm-ps2/fceu.elf
+          if-no-files-found: error
+          retention-days: 30
+          
