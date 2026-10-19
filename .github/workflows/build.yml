@@ -1,4 +1,4 @@
-name: PCE Fast PS2 Standalone Experimental
+name: Beetle PCE Fast PS2 Only - Aurora exFAT + Vorbis Fix
 
 on:
   push:
@@ -59,20 +59,22 @@ jobs:
           }
           echo 'Verified: native Beetle PCE Fast retro_run function.'
 
-      - name: Prepare working exFAT USB modules
+      - name: Copy the original Aurora FAT-exFAT USB driver stack
         shell: sh
         run: |
           set -eu
-          test -s FCEUmm-PS2-exFAT-integrated-2026.zip
           mkdir -p pce-only
-          unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
-            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx > pce-only/usbd.irx
-          unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
-            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx > pce-only/usbhdfsd.irx
-          test -s pce-only/usbd.irx
-          test -s pce-only/usbhdfsd.irx
+          # Four verified matching BDM IRX modules from the SAME Aurora revision.
+          for driver in usbd_mini bdm bdmfs_fatfs usbmass_bd; do
+            test -s "aurora/irx/${driver}.irx" || {
+              echo "Missing Aurora driver: ${driver}.irx"
+              exit 1
+            }
+            cp "aurora/irx/${driver}.irx" "pce-only/${driver}.irx"
+          done
           test -s "$PS2SDK/iop/irx/iomanX.irx"
           test -s "$PS2SDK/iop/irx/fileXio.irx"
+          echo 'Using Aurora original FAT/exFAT stack, no FCEUmm dependency.'
 
       - name: Generate PS2-only Libretro frontend
         shell: sh
@@ -84,7 +86,8 @@ jobs:
            * PCE Fast PS2 - experimental single-core Libretro frontend.
            * Based on the Beetle PCE Fast libretro core used by SNESticle Aurora.
            * This frontend is new; the core is built from its original source.
-           * No ROM or firmware is bundled. Video/input and read-only exFAT first.
+           * No ROM or firmware bundled. Video/input and read-only exFAT first.
+           * Native PS2 libvorbisfile optional; fallback supports cartridges only.
            */
           #include <gsKit.h>
           #include <dmaKit.h>
@@ -108,8 +111,8 @@ jobs:
           #define ROM_LIMIT (8u * 1024u * 1024u)
           #define TEX_SIZE 512
           
-          extern unsigned char bdm_irx[], usb_irx[], iomanx_irx[], filexio_irx[];
-          extern unsigned int size_bdm_irx, size_usb_irx, size_iomanx_irx, size_filexio_irx;
+          extern unsigned char usbd_mini_irx[], bdm_irx[], bdmfs_fatfs_irx[], usbmass_bd_irx[], iomanx_irx[], filexio_irx[];
+          extern unsigned int size_usbd_mini_irx, size_bdm_irx, size_bdmfs_fatfs_irx, size_usbmass_bd_irx, size_iomanx_irx, size_filexio_irx;
           
           typedef struct { char name[256]; int dir; } Entry;
           static Entry entries[MAX_FILES];
@@ -184,8 +187,10 @@ jobs:
             r=load_mod(iomanx_irx,size_iomanx_irx); if(r<0)return r;
             r=load_mod(filexio_irx,size_filexio_irx); if(r<0)return r;
             r=fileXioInit(); if(r<0)return r;
+            r=load_mod(usbd_mini_irx,size_usbd_mini_irx); if(r<0)return r;
             r=load_mod(bdm_irx,size_bdm_irx); if(r<0)return r;
-            r=load_mod(usb_irx,size_usb_irx); if(r<0)return r;
+            r=load_mod(bdmfs_fatfs_irx,size_bdmfs_fatfs_irx); if(r<0)return r;
+            r=load_mod(usbmass_bd_irx,size_usbmass_bd_irx); if(r<0)return r;
             usb_initialized=1;
             return 0;
           }
@@ -476,11 +481,11 @@ jobs:
           PCE_FRONTEND_C
           cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
           EE_BIN = PCE-Fast-Only-PS2.ELF
-          EE_OBJS = pce_only.o bdm.o usb.o iomanx.o filexio.o
+          EE_OBJS = pce_only.o usbd_mini.o bdm.o bdmfs_fatfs.o usbmass_bd.o iomanx.o filexio.o $(PCE_OPTIONAL_OBJS)
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
           EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC)
           EE_LDFLAGS += -L$(GSKIT)/lib -L$(PS2SDK)/ports/lib
-          EE_LIBS += $(PCE_RAW_LIB) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
+          EE_LIBS += $(PCE_RAW_LIB) $(PCE_VORBIS_LIBS) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
           all: $(EE_BIN)
           clean:
           	rm -f $(EE_OBJS) $(EE_BIN)
@@ -495,8 +500,10 @@ jobs:
         run: |
           set -eu
           cd pce-only
-          bin2c usbd.irx bdm.c bdm_irx
-          bin2c usbhdfsd.irx usb.c usb_irx
+          bin2c usbd_mini.irx usbd_mini.c usbd_mini_irx
+          bin2c bdm.irx bdm.c bdm_irx
+          bin2c bdmfs_fatfs.irx bdmfs_fatfs.c bdmfs_fatfs_irx
+          bin2c usbmass_bd.irx usbmass_bd.c usbmass_bd_irx
           bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
           bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
 
@@ -550,6 +557,58 @@ jobs:
           printf '%s\n' "$ZLIB_LIB" > pce-zlib-path.txt
           ls -lh "$ZLIB_LIB"
 
+      - name: Find native PS2 Vorbis libraries or disable CD-track decoding
+        shell: sh
+        run: |
+          set -eu
+          # Cartridge .pce games do not use audioreader Ogg file APIs.
+          # These missing references come from CD track decoding only.
+          ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          VF="$(find "$ROOT" -type f -name libvorbisfile.a -print -quit 2>/dev/null || true)"
+          V="$(find "$ROOT" -type f -name libvorbis.a -print -quit 2>/dev/null || true)"
+          O="$(find "$ROOT" -type f -name libogg.a -print -quit 2>/dev/null || true)"
+          if [ -n "$VF" ] && [ -s "$VF" ] && \
+             [ -n "$V" ] && [ -s "$V" ] && \
+             [ -n "$O" ] && [ -s "$O" ] && \
+             mips64r5900el-ps2-elf-nm -g --defined-only "$VF" | grep -Eq '[[:space:]]ov_open_callbacks$'; then
+            echo 'Native PS2 Ogg/Vorbis libraries found; CD audio decoding enabled.'
+            printf '%s %s %s\n' "$VF" "$V" "$O" > pce-vorbis-libs.txt
+            : > pce-vorbis-extra-objects.txt
+            echo 'vorbisfile/native' > pce-vorbis-mode.txt
+          else
+            # A nonfunctional fake decoder is never advertised as CD support.
+            # Explicit fail-closed stubs resolve the 5 linker references and
+            # preserve real cartridge emulation, without faking decoded data.
+            cat > pce-only/vorbis_no_cd.c <<'PCE_NO_CD_VORBIS_C'
+          /* Cartridge-only experimental build: Ogg CD audio deliberately disabled.
+             These entrypoints are referenced by Mednafen's CD audioreader but
+             must never be used for .pce cartridge games. Always report failure. */
+          #include <stddef.h>
+          int ov_open_callbacks(void *src, void *vf, const char *initial,
+                                long ibytes, void *callbacks) {
+            (void)src; (void)vf; (void)initial; (void)ibytes; (void)callbacks;
+            return -1;
+          }
+          int ov_clear(void *vf) { (void)vf; return 0; }
+          long long ov_pcm_total(void *vf, int stream) {
+            (void)vf; (void)stream; return -1;
+          }
+          long ov_read(void *vf, char *buf, int len, int endian,
+                       int word, int sign, int *bitstream) {
+            (void)vf; (void)buf; (void)len; (void)endian;
+            (void)word; (void)sign; (void)bitstream; return -1;
+          }
+          int ov_pcm_seek(void *vf, long long samples) {
+            (void)vf; (void)samples; return -1;
+          }
+          PCE_NO_CD_VORBIS_C
+            : > pce-vorbis-libs.txt
+            echo 'vorbis_no_cd.o' > pce-vorbis-extra-objects.txt
+            echo 'vorbisfile/stubbed - PCE cartridge only, no CD Ogg' > pce-vorbis-mode.txt
+            echo 'No PS2 Vorbis libraries: CD Ogg disabled; .pce cartridges unaffected.'
+          fi
+          cat pce-vorbis-mode.txt
+
       - name: Compile independent PCE-only PS2 ELF
         shell: sh
         run: |
@@ -561,10 +620,16 @@ jobs:
           }
           LIBRETRO_INC="$(pwd)/$(dirname "$HEADER")"
           ZLIB_LIB="$(cat pce-zlib-path.txt)"
+          VORBIS_LIBS="$(cat pce-vorbis-libs.txt)"
+          OPTIONAL_OBJS="$(cat pce-vorbis-extra-objects.txt)"
           test -s "$ZLIB_LIB" || { echo 'Missing PS2 zlib static library'; exit 1; }
           echo "Libretro include: $LIBRETRO_INC"
           echo "MIPS zlib library: $ZLIB_LIB"
-          if make -C pce-only -j2 PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" PCE_ZLIB_LIB="$ZLIB_LIB" > frontend-build.log 2>&1; then
+          echo "Vorbis mode: $(cat pce-vorbis-mode.txt)"
+          if make -C pce-only -j2 \
+            PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" \
+            PCE_ZLIB_LIB="$ZLIB_LIB" PCE_VORBIS_LIBS="$VORBIS_LIBS" \
+            PCE_OPTIONAL_OBJS="$OPTIONAL_OBJS" > frontend-build.log 2>&1; then
             echo 'Standalone single-core ELF compiled.'
           else
             tail -n 180 frontend-build.log
@@ -600,6 +665,9 @@ jobs:
             zlib-build.log
             pce-zlib-path.txt
             pce-symbols.txt
+            pce-vorbis-mode.txt
+            pce-vorbis-libs.txt
+            pce-vorbis-extra-objects.txt
           if-no-files-found: warn
 
       - name: Upload PCE-only ELF and source for GPL compliance
@@ -611,6 +679,7 @@ jobs:
             pce-only/PCE-Fast-Only-PS2.ELF
             pce-only/pce_only.c
             pce-only/Makefile
+            pce-only/vorbis_no_cd.c
             aurora/LICENSE
             aurora/LICENSES/Beetle-PCE-Fast-GPL-2.0.txt
           if-no-files-found: error
