@@ -1,5 +1,4 @@
-
-name: Beetle PCE Fast PS2 exFAT CPU Test V8 Fixed
+name: Beetle PCE Fast PS2 exFAT CPU Tests V9
 
 on:
   push:
@@ -11,38 +10,48 @@ permissions:
 
 jobs:
   build:
-    name: Build V8 PS2 HuC6280 subset test
+    name: Build V9 HuC6280 CPU diagnostic
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     container:
       image: ps2dev/ps2dev:latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Install tools
-        run: apk add --no-cache make build-base python3 unzip git
-      - name: Extract working exFAT modules
+
+      - name: Install build tools
+        run: |
+          set -eu
+          apk add --no-cache make build-base python3 unzip
+
+      - name: Extract working exFAT drivers
         shell: sh
         run: |
           set -eu
-          mkdir -p ps2-v8
+          mkdir -p ps2-v9
           test -s FCEUmm-PS2-exFAT-integrated-2026.zip
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
-            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx > ps2-v8/usbd.irx
+            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx \
+            > ps2-v9/usbd.irx
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
-            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx > ps2-v8/usbhdfsd.irx
-          test -s ps2-v8/usbd.irx
-          test -s ps2-v8/usbhdfsd.irx
+            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx \
+            > ps2-v9/usbhdfsd.irx
+          test -s ps2-v9/usbd.irx
+          test -s ps2-v9/usbhdfsd.irx
           test -s "$PS2SDK/iop/irx/iomanX.irx"
           test -s "$PS2SDK/iop/irx/fileXio.irx"
           command -v bin2c
-      - name: Generate PS2 V8 source and Makefile
+
+      - name: Generate standalone V9 source
         shell: sh
         run: |
-          cat > ps2-v8/app.c <<'END_V8_C'
-          /* PS2 exFAT CPU diagnostic.
-           * Partial CPU instruction test, not full emulation.
-           * Preserves read-only USB and gamepad routines. */
+          set -eu
+          mkdir -p ps2-v9
+          cat > ps2-v9/app.c <<'END_V9_C'
+          /* PS2 exFAT V9: ROM browser, HuC6280 bank mapping and test CPU.
+           * Only isolated synthetic test programs execute; games do not.
+           * Keeps the working V8 read-only USB and gamepad routines. */
           #include <gsKit.h>
           #include <dmaKit.h>
           #include <stddef.h>
@@ -58,7 +67,7 @@ jobs:
           #include <stdlib.h>
           #include <string.h>
           #include <ctype.h>
-
+          
           #define MAX_ITEMS 120
           #define VISIBLE 8
           #define PATH_MAX_LEN 512
@@ -66,1366 +75,679 @@ jobs:
           #define CHUNK 16384
           #define ROM_MAX (8*1024*1024)
           #define ROM_BANK 8192
-
-          static const char fontkeys[] =
-              "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:.";
-
+          
+          static const char fontkeys[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:.";
           static const unsigned long long fontbits[] = {
-              0x4631fc62eULL, 0x3e317c62fULL, 0x78210843eULL,
-              0x3e318c62fULL, 0x7c217843fULL, 0x04217843fULL,
-              0x3a31e843eULL, 0x4631fc631ULL, 0x7c842109fULL,
-              0x19294211cULL, 0x452519531ULL, 0x7c2108421ULL,
-              0x4631ad771ULL, 0x4631cd671ULL, 0x3a318c62eULL,
-              0x04217c62fULL, 0x59358c62eULL, 0x45257c62fULL,
-              0x3e107043eULL, 0x10842109fULL, 0x3a318c631ULL,
-              0x11518c631ULL, 0x4775ac631ULL, 0x462a22a31ULL,
-              0x108422a31ULL, 0x7c222221fULL, 0x3a33ae62eULL,
-              0x3884210c4ULL, 0x7c444422eULL, 0x3e107420fULL,
-              0x211f4a988ULL, 0x3e107843fULL, 0x3a317842eULL,
-              0x08422221fULL, 0x3a317462eULL, 0x3a10f462eULL,
-              0x0000f8000ULL, 0x042222210ULL, 0x008401080ULL,
-              0x18c000000ULL
+              0x4631fc62eULL, 0x3e317c62fULL, 0x78210843eULL, 0x3e318c62fULL, 0x7c217843fULL,
+              0x04217843fULL, 0x3a31e843eULL, 0x4631fc631ULL, 0x7c842109fULL, 0x19294211cULL,
+              0x452519531ULL, 0x7c2108421ULL, 0x4631ad771ULL, 0x4631cd671ULL, 0x3a318c62eULL,
+              0x04217c62fULL, 0x59358c62eULL, 0x45257c62fULL, 0x3e107043eULL, 0x10842109fULL,
+              0x3a318c631ULL, 0x11518c631ULL, 0x4775ac631ULL, 0x462a22a31ULL, 0x108422a31ULL,
+              0x7c222221fULL, 0x3a33ae62eULL, 0x3884210c4ULL, 0x7c444422eULL, 0x3e107420fULL,
+              0x211f4a988ULL, 0x3e107843fULL, 0x3a317842eULL, 0x08422221fULL, 0x3a317462eULL,
+              0x3a10f462eULL, 0x0000f8000ULL, 0x042222210ULL, 0x008401080ULL, 0x18c000000ULL
           };
-
-          static void text5(
-              GSGLOBAL *gs,
-              int x,
-              int y,
-              int scale,
-              const char *s,
-              u64 color
-          )
+          static void text5(GSGLOBAL *gs,int x,int y,int scale,const char *s,u64 color)
           {
               int i,r,c,j;
               for (i=0;s[i];i++) {
                   char ch=(char)toupper((unsigned char)s[i]);
                   unsigned long long bitmap=0;
-
-                  for(j=0;fontkeys[j];j++) {
-                      if(fontkeys[j]==ch) {
-                          bitmap=fontbits[j];
-                          break;
-                      }
-                  }
-
-                  for(r=0;r<7;r++) {
-                      for(c=0;c<5;c++) {
-                          if(bitmap & (1ULL << (r*5+c))) {
-                              float px=(float)(x+(i*6+c)*scale);
-                              float py=(float)(y+r*scale);
-                              gsKit_prim_sprite(
-                                  gs,px,py,
-                                  px+scale,py+scale,
-                                  1,color
-                              );
-                          }
+                  for(j=0;fontkeys[j];j++) if(fontkeys[j]==ch){bitmap=fontbits[j];break;}
+                  for(r=0;r<7;r++) for(c=0;c<5;c++) {
+                      if(bitmap & (1ULL << (r*5+c))) {
+                          float px=(float)(x+(i*6+c)*scale);
+                          float py=(float)(y+r*scale);
+                          gsKit_prim_sprite(gs,px,py,px+scale,py+scale,1,color);
                       }
                   }
               }
           }
-
-          extern unsigned char exfat_bdm_irx[];
-          extern unsigned char exfat_usb_irx[];
-          extern unsigned char iomanx_irx[];
-          extern unsigned char filexio_irx[];
-
-          extern unsigned int size_exfat_bdm_irx;
-          extern unsigned int size_exfat_usb_irx;
-          extern unsigned int size_iomanx_irx;
-          extern unsigned int size_filexio_irx;
-
-          static char pad_buffer[256]
-              __attribute__((aligned(64)));
-
-          static iox_dirent_t dir_entry
-              __attribute__((aligned(64)));
-
-          static iox_stat_t file_stat
-              __attribute__((aligned(64)));
-
-          static unsigned char io_buffer[CHUNK]
-              __attribute__((aligned(64)));
-
+          
+          extern unsigned char exfat_bdm_irx[],exfat_usb_irx[],iomanx_irx[],filexio_irx[];
+          extern unsigned int size_exfat_bdm_irx,size_exfat_usb_irx,size_iomanx_irx,size_filexio_irx;
+          static char pad_buffer[256] __attribute__((aligned(64)));
+          static iox_dirent_t dir_entry __attribute__((aligned(64)));
+          static iox_stat_t file_stat __attribute__((aligned(64)));
+          static unsigned char io_buffer[CHUNK] __attribute__((aligned(64)));
           static unsigned char *rom=NULL;
-
-          typedef struct {
-              char name[NAME_MAX_LEN];
-              int directory;
-          } Item;
-
+          
+          typedef struct { char name[NAME_MAX_LEN]; int directory; } Item;
           static Item items[MAX_ITEMS];
-
-          static int count=0;
-          static int selected=0;
-          static int screen=0;
-          static int hidden=0;
-
-          static int pad_ok=0;
-          static int usb_ok=0;
-          static int usb_error=0;
-          static int listing_error=0;
-
+          static int count=0,selected=0,screen=0,hidden=0;
+          static int pad_ok=0,usb_ok=0,usb_error=0,listing_error=0;
           static unsigned oldkeys=0;
-
           static char current_path[PATH_MAX_LEN]="mass:/";
           static char full_path[PATH_MAX_LEN]="";
-
-          static int size_rom=0;
-          static int read_rom=0;
-          static int blocks=0;
-          static int last_pos=0;
-          static int error_rom=0;
-          static int loaded=0;
-
-          static unsigned int disk_crc=0;
-          static unsigned int ram_crc=0;
-
-          static int header_skip=0;
-          static int bank_count=0;
-          static int vector_pc=0;
-          static int vector_opcode=0;
+          static int size_rom=0,read_rom=0,blocks=0,last_pos=0,error_rom=0,loaded=0;
+          static unsigned int disk_crc=0,ram_crc=0;
+          static int header_skip=0,bank_count=0,vector_pc=0,vector_opcode=0;
           static int mapping_ok=0;
-
           static unsigned char mpr[8];
-
-          static unsigned crc_step(
-              unsigned crc,
-              const unsigned char *data,
-              int n
-          )
+          
+          static unsigned crc_step(unsigned crc,const unsigned char *data,int n)
           {
               int i,k;
-
               for(i=0;i<n;i++) {
                   crc^=data[i];
-                  for(k=0;k<8;k++) {
-                      crc=(crc & 1u)
-                          ? ((crc>>1)^0xEDB88320u)
-                          : (crc>>1);
-                  }
+                  for(k=0;k<8;k++) crc=(crc & 1u) ? ((crc>>1)^0xEDB88320u):(crc>>1);
               }
-
               return crc;
           }
-
           static int pad_start(void)
           {
               int a,b;
-
               SifInitRpc(0);
               a=SifLoadModule("rom0:XSIO2MAN",0,NULL);
               b=SifLoadModule("rom0:XPADMAN",0,NULL);
-
-              if(a<0||b<0||padInit(0)!=1)
-                  return 0;
-
+              if(a<0||b<0||padInit(0)!=1) return 0;
               pad_ok=padPortOpen(0,0,pad_buffer)!=0;
               return pad_ok;
           }
-
           static unsigned keys_new(void)
           {
               struct padButtonStatus buttons;
               int state;
               unsigned now,delta;
-
-              if(!pad_ok)
-                  return 0;
-
+              if(!pad_ok) return 0;
               state=padGetState(0,0);
-
-              if(
-                  state!=PAD_STATE_STABLE &&
-                  state!=PAD_STATE_FINDCTP1
-              ) {
-                  oldkeys=0;
-                  return 0;
-              }
-
-              if(!padRead(0,0,&buttons))
-                  return 0;
-
+              if(state!=PAD_STATE_STABLE && state!=PAD_STATE_FINDCTP1){oldkeys=0;return 0;}
+              if(!padRead(0,0,&buttons)) return 0;
               now=(unsigned)(0xffffu^buttons.btns);
               delta=now & ~oldkeys;
               oldkeys=now;
-
               return delta;
           }
-
-          static int module_load(
-              const void *data,
-              unsigned size
-          )
+          static int module_load(const void *data,unsigned size)
           {
-              int result=0;
-              int id=SifExecModuleBuffer(
-                  (void *)data,
-                  size,0,NULL,&result
-              );
-
-              if(id<0)
-                  return id;
-
+              int result=0, id=SifExecModuleBuffer((void *)data,size,0,NULL,&result);
+              if(id<0) return id;
               return result<0 ? result : 0;
           }
-
           static int usb_start(void)
           {
               int rc;
-
-              if(usb_ok)
-                  return 0;
-
+              if(usb_ok) return 0;
               SifLoadFileInit();
               SifInitIopHeap();
               sbv_patch_enable_lmb();
-
-              rc=module_load(
-                  iomanx_irx,size_iomanx_irx
-              );
-              if(rc<0)return rc;
-
-              rc=module_load(
-                  filexio_irx,size_filexio_irx
-              );
-              if(rc<0)return rc;
-
+              rc=module_load(iomanx_irx,size_iomanx_irx);
+              if(rc<0) return rc;
+              rc=module_load(filexio_irx,size_filexio_irx);
+              if(rc<0) return rc;
               rc=fileXioInit();
-              if(rc<0)return rc;
-
-              rc=module_load(
-                  exfat_bdm_irx,size_exfat_bdm_irx
-              );
-              if(rc<0)return rc;
-
-              rc=module_load(
-                  exfat_usb_irx,size_exfat_usb_irx
-              );
-              if(rc<0)return rc;
-
+              if(rc<0) return rc;
+              rc=module_load(exfat_bdm_irx,size_exfat_bdm_irx);
+              if(rc<0) return rc;
+              rc=module_load(exfat_usb_irx,size_exfat_usb_irx);
+              if(rc<0) return rc;
               usb_ok=1;
               return 0;
           }
-
           static int is_rom(const char *name)
           {
               const char *ext=strrchr(name,'.');
-
-              if(!ext||strlen(ext)!=4)
-                  return 0;
-
-              return (
-                  tolower((unsigned char)ext[1])=='p' &&
-                  tolower((unsigned char)ext[2])=='c' &&
-                  tolower((unsigned char)ext[3])=='e'
-              ) || (
-                  tolower((unsigned char)ext[1])=='s' &&
-                  tolower((unsigned char)ext[2])=='g' &&
-                  tolower((unsigned char)ext[3])=='x'
-              );
+              if(!ext||strlen(ext)!=4) return 0;
+              return (tolower((unsigned char)ext[1])=='p' &&
+                      tolower((unsigned char)ext[2])=='c' &&
+                      tolower((unsigned char)ext[3])=='e') ||
+                     (tolower((unsigned char)ext[1])=='s' &&
+                      tolower((unsigned char)ext[2])=='g' &&
+                      tolower((unsigned char)ext[3])=='x');
           }
-
-          static int compare_items(
-              const void *aa,
-              const void *bb
-          )
+          static int compare_items(const void *aa,const void *bb)
           {
-              const Item *a=(const Item *)aa;
-              const Item *b=(const Item *)bb;
+              const Item *a=(const Item *)aa,*b=(const Item *)bb;
               int i;
-
-              if(a->directory!=b->directory)
-                  return b->directory-a->directory;
-
+              if(a->directory!=b->directory) return b->directory-a->directory;
               for(i=0;i<NAME_MAX_LEN;i++) {
                   int x=tolower((unsigned char)a->name[i]);
                   int y=tolower((unsigned char)b->name[i]);
-
-                  if(x!=y)
-                      return x-y;
-
-                  if(!x)
-                      break;
+                  if(x!=y) return x-y;
+                  if(!x) break;
               }
-
               return 0;
           }
-
           static int list_dir(void)
           {
               int d,rc,n,folder;
-
-              count=0;
-              hidden=0;
-              selected=0;
-              listing_error=0;
-
+              count=0;hidden=0;selected=0;listing_error=0;
               d=fileXioDopen(current_path);
-
-              if(d<0) {
-                  listing_error=d;
-                  return d;
-              }
-
+              if(d<0){listing_error=d;return d;}
               for(n=0;n<2048;n++) {
-                  memset(
-                      &dir_entry,0,sizeof(dir_entry)
-                  );
-
+                  memset(&dir_entry,0,sizeof(dir_entry));
                   rc=fileXioDread(d,&dir_entry);
-
-                  if(rc<=0) {
-                      if(rc<0)
-                          listing_error=rc;
-                      break;
-                  }
-
+                  if(rc<=0){if(rc<0)listing_error=rc;break;}
                   dir_entry.name[NAME_MAX_LEN-1]=0;
-
-                  if(
-                      !dir_entry.name[0] ||
-                      !strcmp(dir_entry.name,".") ||
-                      !strcmp(dir_entry.name,"..")
-                  ) continue;
-
-                  folder=FIO_S_ISDIR(
-                      dir_entry.stat.mode
-                  );
-
-                  if(
-                      !folder &&
-                      !is_rom(dir_entry.name)
-                  ) continue;
-
-                  if(count>=MAX_ITEMS) {
-                      hidden++;
-                      continue;
-                  }
-
-                  strcpy(
-                      items[count].name,
-                      dir_entry.name
-                  );
-
+                  if(!dir_entry.name[0]||!strcmp(dir_entry.name,".")||!strcmp(dir_entry.name,".."))continue;
+                  folder=FIO_S_ISDIR(dir_entry.stat.mode);
+                  if(!folder && !is_rom(dir_entry.name))continue;
+                  if(count>=MAX_ITEMS){hidden++;continue;}
+                  strcpy(items[count].name,dir_entry.name);
                   items[count].directory=folder;
                   count++;
               }
-
               fileXioDclose(d);
-
-              qsort(
-                  items,count,
-                  sizeof(Item),
-                  compare_items
-              );
-
+              qsort(items,count,sizeof(Item),compare_items);
               return listing_error;
           }
-
           static void up_dir(void)
           {
               int n=(int)strlen(current_path);
-              int root=(
-                  !strncmp(current_path,"mass0:/",7)
-              ) ? 7 : 6;
-
-              if(n<=root) {
-                  screen=0;
-                  return;
-              }
-
-              if(current_path[n-1]=='/')
-                  n--;
-
-              while(
-                  n>root &&
-                  current_path[n-1]!='/'
-              ) n--;
-
+              int root=!strncmp(current_path,"mass0:/",7)?7:6;
+              if(n<=root){screen=0;return;}
+              if(current_path[n-1]=='/')n--;
+              while(n>root && current_path[n-1]!='/')n--;
               current_path[n]=0;
               list_dir();
           }
-
           static void rom_free(void)
           {
-              if(rom) {
-                  free(rom);
-                  rom=NULL;
-              }
-
-              loaded=0;
-              mapping_ok=0;
+              if(rom){free(rom);rom=NULL;}
+              loaded=0;mapping_ok=0;
           }
-
-          /*
-           * Logical HuC6280 memory mapping probe.
-           * Eight logical pages of 8 KiB.
-           * Does not implement hardware I/O or IRQ.
-           */
-          static unsigned char mapped_read(
-              unsigned short address
-          )
+          /* First CPU integration prerequisite: logical 64 KiB address pages (8 KiB)
+           * mapped through HuC6280's MPR to physical 8 KiB HuCard banks.
+           * Only cartridge ROM reads are represented here. RAM/IO/IRQ are NOT. */
+          static unsigned char mapped_read(unsigned short address)
           {
               unsigned page=((unsigned)address)>>13;
               unsigned bank=mpr[page];
-
-              unsigned offset=
-                  header_skip+
-                  bank*ROM_BANK+
-                  (address & (ROM_BANK-1));
-
-              if(
-                  !rom ||
-                  bank>=(unsigned)bank_count ||
-                  offset>=(unsigned)size_rom
-              ) return 0xff;
-
+              unsigned offset=header_skip+bank*ROM_BANK+(address & (ROM_BANK-1));
+              if(!rom || bank>=(unsigned)bank_count || offset>=(unsigned)size_rom) return 0xff;
               return rom[offset];
           }
-
           static void cpu_map_probe(void)
           {
               int i;
-
-              header_skip=(
-                  size_rom % ROM_BANK == 512
-              ) ? 512 : 0;
-
-              bank_count=(
-                  size_rom-header_skip
-              )/ROM_BANK;
-
-              for(i=0;i<8;i++)
-                  mpr[i]=0;
-
+              header_skip=(size_rom % ROM_BANK == 512)?512:0;
+              bank_count=(size_rom-header_skip)/ROM_BANK;
+              for(i=0;i<8;i++)mpr[i]=0;
+              /* HuC6280 reset maps MPR7 to physical bank 0. */
               mpr[7]=0;
-
-              vector_pc=mapped_read(0xfffe) |
-                  ((int)mapped_read(0xffff)<<8);
-
-              vector_opcode=mapped_read(
-                  (unsigned short)vector_pc
-              );
-
-              mapping_ok=(
-                  bank_count>0 &&
-                  bank_count<=256
-              );
+              vector_pc=mapped_read(0xfffe)|((int)mapped_read(0xffff)<<8);
+              vector_opcode=mapped_read((unsigned short)vector_pc);
+              mapping_ok=(bank_count>0 && bank_count<=256);
           }
-
           static void rom_load(void)
           {
               int fd,rc,want,offset=0,close_rc;
               unsigned crc=0xffffffffu;
-
               rom_free();
-
-              size_rom=0;
-              read_rom=0;
-              blocks=0;
-              last_pos=-9999;
-              disk_crc=0;
-              ram_crc=0;
-              error_rom=0;
-
-              memset(
-                  &file_stat,0,sizeof(file_stat)
-              );
-
-              rc=fileXioGetStat(
-                  full_path,&file_stat
-              );
-
-              if(rc<0) {
-                  error_rom=rc;
-                  return;
-              }
-
-              if(
-                  file_stat.hisize!=0 ||
-                  file_stat.size==0 ||
-                  file_stat.size>ROM_MAX
-              ) {
-                  error_rom=-100;
-                  return;
-              }
-
+              size_rom=0;read_rom=0;blocks=0;last_pos=-9999;
+              disk_crc=0;ram_crc=0;error_rom=0;
+              memset(&file_stat,0,sizeof(file_stat));
+              rc=fileXioGetStat(full_path,&file_stat);
+              if(rc<0){error_rom=rc;return;}
+              if(file_stat.hisize!=0 || file_stat.size==0 || file_stat.size>ROM_MAX){error_rom=-100;return;}
               size_rom=(int)file_stat.size;
-              rom=(unsigned char *)malloc(
-                  (size_t)size_rom
-              );
-
-              if(!rom) {
-                  error_rom=-101;
-                  return;
-              }
-
-              fd=fileXioOpen(
-                  full_path,FIO_O_RDONLY
-              );
-
-              if(fd<0) {
-                  error_rom=fd;
-                  rom_free();
-                  return;
-              }
-
-              rc=fileXioLseek(
-                  fd,0,FIO_SEEK_SET
-              );
-
-              if(rc!=0) {
-                  error_rom=rc<0?rc:-102;
-              }
-
-              while(
-                  error_rom==0 &&
-                  offset<size_rom
-              ) {
+              rom=(unsigned char *)malloc((size_t)size_rom);
+              if(!rom){error_rom=-101;return;}
+              fd=fileXioOpen(full_path,FIO_O_RDONLY);
+              if(fd<0){error_rom=fd;rom_free();return;}
+              rc=fileXioLseek(fd,0,FIO_SEEK_SET);
+              if(rc!=0){error_rom=rc<0?rc:-102;}
+              while(error_rom==0 && offset<size_rom) {
                   want=size_rom-offset;
-
-                  if(want>CHUNK)
-                      want=CHUNK;
-
-                  rc=fileXioRead(
-                      fd,io_buffer,want
-                  );
-
-                  if(rc<=0||rc>want) {
-                      error_rom=rc<0?rc:-103;
-                      break;
-                  }
-
-                  memcpy(
-                      rom+offset,
-                      io_buffer,
-                      (size_t)rc
-                  );
-
-                  crc=crc_step(
-                      crc,io_buffer,rc
-                  );
-
+                  if(want>CHUNK)want=CHUNK;
+                  rc=fileXioRead(fd,io_buffer,want);
+                  if(rc<=0||rc>want){error_rom=rc<0?rc:-103;break;}
+                  memcpy(rom+offset,io_buffer,(size_t)rc);
+                  crc=crc_step(crc,io_buffer,rc);
                   offset+=rc;
                   blocks++;
                   read_rom=offset;
               }
-
-              last_pos=fileXioLseek(
-                  fd,0,FIO_SEEK_CUR
-              );
-
+              last_pos=fileXioLseek(fd,0,FIO_SEEK_CUR);
               close_rc=fileXioClose(fd);
               disk_crc=crc^0xffffffffu;
-
-              if(
-                  error_rom==0 &&
-                  (
-                      offset!=size_rom ||
-                      last_pos!=size_rom
-                  )
-              ) error_rom=-104;
-
-              if(
-                  error_rom==0 &&
-                  close_rc<0
-              ) error_rom=close_rc;
-
+              if(error_rom==0 && (offset!=size_rom||last_pos!=size_rom))error_rom=-104;
+              if(error_rom==0 && close_rc<0)error_rom=close_rc;
               if(error_rom==0) {
-                  ram_crc=crc_step(
-                      0xffffffffu,
-                      rom,size_rom
-                  )^0xffffffffu;
-
-                  if(ram_crc!=disk_crc)
-                      error_rom=-106;
+                  ram_crc=crc_step(0xffffffffu,rom,size_rom)^0xffffffffu;
+                  if(ram_crc!=disk_crc)error_rom=-106;
               }
-
-              if(error_rom!=0) {
-                  rom_free();
-                  return;
-              }
-
+              if(error_rom!=0){rom_free();return;}
               loaded=1;
               cpu_map_probe();
           }
-
-          /*
-           * Partial HuC6280 instruction test.
-           * Only a synthetic six-instruction
-           * program runs in isolated RAM.
+          
+          /* V9: incremental HuC6280 interpreter subset.
+           * Executes ONLY synthetic test programs in isolated mapped RAM.
+           * NOT the official Beetle PCE Fast emulator, NOT game execution.
+           * CPU cycle values approximate the individual supported opcodes.
            */
+          #define F_C 0x01
+          #define F_Z 0x02
+          #define F_I 0x04
+          #define F_D 0x08
+          #define F_B 0x10
+          #define F_V 0x40
+          #define F_N 0x80
+          #define V9_TESTS 5
+          
           typedef struct {
               unsigned short pc;
               unsigned char a,x,y,s,p,mpr[8];
               unsigned char ram[8192];
               int cycles,steps,error;
           } HucTestCPU;
-
           static HucTestCPU testcpu;
           static int cpu_test_result=0;
-
-          static unsigned char cpu_mem_read(
-              unsigned short addr
-          )
+          static int cpu_tests_passed=0;
+          static int cpu_failed_test=0;
+          static int cpu_test_steps=0;
+          static int cpu_test_cycles=0;
+          static unsigned char cpu_last_opcode=0;
+          
+          static unsigned char cpu_mem_read(unsigned short addr)
           {
               unsigned page=((unsigned)addr)>>13;
               unsigned bank=testcpu.mpr[page];
-              unsigned offset=(
-                  (unsigned)addr
-              )&8191u;
+              unsigned offset=((unsigned)addr)&8191u;
               unsigned location;
-
-              if(bank==0xf8)
-                  return testcpu.ram[offset];
-
-              if(
-                  !rom ||
-                  bank >= (unsigned)bank_count
-              ) return 0xff;
-
-              location=(
-                  (unsigned)header_skip+
-                  bank*8192u+
-                  offset
-              );
-
-              if(
-                  location >= (unsigned)size_rom
-              ) return 0xff;
-
-              return rom[location];
+              if(bank==0xf8) return testcpu.ram[offset];
+              if(!rom || bank >= (unsigned)bank_count) return 0xff;
+              location=(unsigned)header_skip+bank*8192u+offset;
+              return location<(unsigned)size_rom ? rom[location] : 0xff;
           }
-
-          static void cpu_mem_write(
-              unsigned short addr,
-              unsigned char val
-          )
+          static void cpu_mem_write(unsigned short addr,unsigned char val)
           {
-              unsigned bank=testcpu.mpr[
-                  ((unsigned)addr)>>13
-              ];
-
-              if(bank==0xf8) {
-                  testcpu.ram[
-                      ((unsigned)addr)&8191u
-                  ]=val;
-              }
+              if(testcpu.mpr[((unsigned)addr)>>13]==0xf8)
+                  testcpu.ram[((unsigned)addr)&8191u]=val;
           }
-
           static unsigned char cpu_fetch(void)
           {
-              unsigned char val=cpu_mem_read(
-                  testcpu.pc
-              );
-
-              testcpu.pc=(
-                  unsigned short
-              )(testcpu.pc+1);
-
-              return val;
+              unsigned char v=cpu_mem_read(testcpu.pc);
+              testcpu.pc=(unsigned short)(testcpu.pc+1u);
+              return v;
           }
-
-          static void cpu_zn(
-              unsigned char value
-          )
+          static unsigned short cpu_fetch_word(void)
           {
-              testcpu.p=(
-                  unsigned char
-              )(testcpu.p & ~(0x80u|0x02u));
-
-              if(value==0)
-                  testcpu.p|=0x02u;
-
-              if(value&0x80u)
-                  testcpu.p|=0x80u;
+              unsigned low=cpu_fetch(),high=cpu_fetch();
+              return (unsigned short)(low|(high<<8));
           }
-
+          static void cpu_zn(unsigned char v)
+          {
+              testcpu.p=(unsigned char)(testcpu.p & ~(F_N|F_Z));
+              if(v==0) testcpu.p|=F_Z;
+              if(v&0x80) testcpu.p|=F_N;
+          }
+          static void cpu_push(unsigned char v)
+          {
+              cpu_mem_write((unsigned short)(0x2100u|testcpu.s),v);
+              --testcpu.s;
+          }
+          static unsigned char cpu_pop(void)
+          {
+              ++testcpu.s;
+              return cpu_mem_read((unsigned short)(0x2100u|testcpu.s));
+          }
+          static void cpu_compare(unsigned char lhs,unsigned char rhs)
+          {
+              unsigned v=(unsigned)lhs-(unsigned)rhs;
+              testcpu.p=(unsigned char)(testcpu.p & ~F_C);
+              if(lhs>=rhs) testcpu.p|=F_C;
+              cpu_zn((unsigned char)v);
+          }
+          static void cpu_adc(unsigned char v)
+          {
+              unsigned a=testcpu.a,carry=(testcpu.p&F_C)?1u:0u;
+              unsigned result=a+v+carry;
+              /* Decimal mode and HuC6280 T-flag ALU are deliberately unsupported. */
+              testcpu.p=(unsigned char)(testcpu.p & ~(F_C|F_V));
+              if(result>255u) testcpu.p|=F_C;
+              if((~(a^v)&(a^result)&0x80u)!=0u) testcpu.p|=F_V;
+              testcpu.a=(unsigned char)result;
+              cpu_zn(testcpu.a);
+          }
+          static void cpu_sbc(unsigned char v)
+          {
+              unsigned a=testcpu.a,borrow=(testcpu.p&F_C)?0u:1u;
+              unsigned result=a-(unsigned)v-borrow;
+              testcpu.p=(unsigned char)(testcpu.p & ~(F_C|F_V));
+              if(result<256u) testcpu.p|=F_C;
+              if(((a^v)&(a^result)&0x80u)!=0u) testcpu.p|=F_V;
+              testcpu.a=(unsigned char)result;
+              cpu_zn(testcpu.a);
+          }
+          static void cpu_branch(int condition)
+          {
+              signed char delta=(signed char)cpu_fetch();
+              testcpu.cycles+=2;
+              if(condition) {
+                  testcpu.pc=(unsigned short)(testcpu.pc+(int)delta);
+                  ++testcpu.cycles;
+              }
+          }
           static int cpu_single_step(void)
           {
               unsigned char op=cpu_fetch();
-              unsigned lo,hi;
               unsigned short addr;
-
+              unsigned char value,mask;
+              unsigned i;
+              cpu_last_opcode=op;
+          
+              /* Fail safely rather than approximate unsupported interrupt/I/O opcodes. */
               switch(op) {
-                  case 0xa9:
-                      testcpu.a=cpu_fetch();
-                      cpu_zn(testcpu.a);
-                      testcpu.cycles+=2;
-                      break;
-
-                  case 0xaa:
-                      testcpu.x=testcpu.a;
-                      cpu_zn(testcpu.x);
-                      testcpu.cycles+=2;
-                      break;
-
-                  case 0xe8:
-                      ++testcpu.x;
-                      cpu_zn(testcpu.x);
-                      testcpu.cycles+=2;
-                      break;
-
-                  case 0x8e:
-                      lo=cpu_fetch();
-                      hi=cpu_fetch();
-
-                      addr=(unsigned short)(
-                          lo|(hi<<8)
-                      );
-
-                      cpu_mem_write(
-                          addr,testcpu.x
-                      );
-
-                      testcpu.cycles+=4;
-                      break;
-
-                  case 0xad:
-                      lo=cpu_fetch();
-                      hi=cpu_fetch();
-
-                      addr=(unsigned short)(
-                          lo|(hi<<8)
-                      );
-
-                      testcpu.a=cpu_mem_read(addr);
-                      cpu_zn(testcpu.a);
-                      testcpu.cycles+=4;
-                      break;
-
-                  case 0xea:
-                      testcpu.cycles+=2;
-                      break;
-
-                  default:
-                      testcpu.error=(int)op;
-                      return -1;
+              case 0xea: testcpu.cycles+=2; break; /* NOP */
+              case 0xa9: testcpu.a=cpu_fetch();cpu_zn(testcpu.a);testcpu.cycles+=2;break;
+              case 0xa2: testcpu.x=cpu_fetch();cpu_zn(testcpu.x);testcpu.cycles+=2;break;
+              case 0xa0: testcpu.y=cpu_fetch();cpu_zn(testcpu.y);testcpu.cycles+=2;break;
+              case 0xad: addr=cpu_fetch_word();testcpu.a=cpu_mem_read(addr);cpu_zn(testcpu.a);testcpu.cycles+=4;break;
+              case 0xae: addr=cpu_fetch_word();testcpu.x=cpu_mem_read(addr);cpu_zn(testcpu.x);testcpu.cycles+=4;break;
+              case 0xac: addr=cpu_fetch_word();testcpu.y=cpu_mem_read(addr);cpu_zn(testcpu.y);testcpu.cycles+=4;break;
+              case 0x8d: addr=cpu_fetch_word();cpu_mem_write(addr,testcpu.a);testcpu.cycles+=4;break;
+              case 0x8e: addr=cpu_fetch_word();cpu_mem_write(addr,testcpu.x);testcpu.cycles+=4;break;
+              case 0x8c: addr=cpu_fetch_word();cpu_mem_write(addr,testcpu.y);testcpu.cycles+=4;break;
+              case 0x85: value=cpu_fetch();cpu_mem_write((unsigned short)(0x2000u|value),testcpu.a);testcpu.cycles+=4;break;
+              case 0xa5: value=cpu_fetch();testcpu.a=cpu_mem_read((unsigned short)(0x2000u|value));cpu_zn(testcpu.a);testcpu.cycles+=4;break;
+              case 0xaa: testcpu.x=testcpu.a;cpu_zn(testcpu.x);testcpu.cycles+=2;break;
+              case 0x8a: testcpu.a=testcpu.x;cpu_zn(testcpu.a);testcpu.cycles+=2;break;
+              case 0xa8: testcpu.y=testcpu.a;cpu_zn(testcpu.y);testcpu.cycles+=2;break;
+              case 0x98: testcpu.a=testcpu.y;cpu_zn(testcpu.a);testcpu.cycles+=2;break;
+              case 0xe8: ++testcpu.x;cpu_zn(testcpu.x);testcpu.cycles+=2;break;
+              case 0xca: --testcpu.x;cpu_zn(testcpu.x);testcpu.cycles+=2;break;
+              case 0xc8: ++testcpu.y;cpu_zn(testcpu.y);testcpu.cycles+=2;break;
+              case 0x88: --testcpu.y;cpu_zn(testcpu.y);testcpu.cycles+=2;break;
+              case 0x18: testcpu.p=(unsigned char)(testcpu.p&~F_C);testcpu.cycles+=2;break;
+              case 0x38: testcpu.p|=F_C;testcpu.cycles+=2;break;
+              case 0x58: testcpu.p=(unsigned char)(testcpu.p&~F_I);testcpu.cycles+=2;break;
+              case 0x78: testcpu.p|=F_I;testcpu.cycles+=2;break;
+              case 0x69: cpu_adc(cpu_fetch());testcpu.cycles+=2;break;
+              case 0xe9: cpu_sbc(cpu_fetch());testcpu.cycles+=2;break;
+              case 0xc9: cpu_compare(testcpu.a,cpu_fetch());testcpu.cycles+=2;break;
+              case 0xe0: cpu_compare(testcpu.x,cpu_fetch());testcpu.cycles+=2;break;
+              case 0xc0: cpu_compare(testcpu.y,cpu_fetch());testcpu.cycles+=2;break;
+              case 0x48: cpu_push(testcpu.a);testcpu.cycles+=3;break;
+              case 0x68: testcpu.a=cpu_pop();cpu_zn(testcpu.a);testcpu.cycles+=4;break;
+              case 0x08: cpu_push((unsigned char)(testcpu.p|F_B));testcpu.cycles+=3;break;
+              case 0x28: testcpu.p=cpu_pop();testcpu.cycles+=4;break;
+              case 0x4c: testcpu.pc=cpu_fetch_word();testcpu.cycles+=3;break;
+              case 0x20:
+                  addr=cpu_fetch_word();
+                  value=(unsigned char)((testcpu.pc-1u)>>8);
+                  cpu_push(value);
+                  cpu_push((unsigned char)(testcpu.pc-1u));
+                  testcpu.pc=addr;
+                  testcpu.cycles+=6;
+                  break;
+              case 0x60:
+                  addr=cpu_pop();addr|=(unsigned short)((unsigned)cpu_pop()<<8);
+                  testcpu.pc=(unsigned short)(addr+1u);
+                  testcpu.cycles+=6;
+                  break;
+              case 0xd0: cpu_branch(!(testcpu.p&F_Z));break;
+              case 0xf0: cpu_branch( (testcpu.p&F_Z));break;
+              case 0x90: cpu_branch(!(testcpu.p&F_C));break;
+              case 0xb0: cpu_branch( (testcpu.p&F_C));break;
+              case 0x10: cpu_branch(!(testcpu.p&F_N));break;
+              case 0x30: cpu_branch( (testcpu.p&F_N));break;
+              case 0x53: /* HuC6280 TAM #mask: A to selected MPR registers */
+                  mask=cpu_fetch();
+                  for(i=0;i<8;i++) if(mask&(1u<<i)) testcpu.mpr[i]=testcpu.a;
+                  testcpu.cycles+=5;
+                  break;
+              case 0x43: /* HuC6280 TMA #mask: selected MPR to A */
+                  mask=cpu_fetch();
+                  if(!mask) {testcpu.error=0x143;return -1;}
+                  for(i=0;i<8;i++) if(mask&(1u<<i)) testcpu.a=testcpu.mpr[i];
+                  testcpu.cycles+=5;
+                  break;
+              default:
+                  testcpu.error=(int)op;
+                  return -1;
               }
-
               ++testcpu.steps;
               return 0;
           }
-
-          static void cpu_run_selftest(void)
+          
+          static void cpu_test_setup(const unsigned char *program,unsigned length)
           {
-              static const unsigned char program[]={
-                  0xa9,0x2a,
-                  0xaa,
-                  0xe8,
-                  0x8e,0x00,0x22,
-                  0xad,0x00,0x22,
-                  0xea
-              };
-
-              int i;
-              cpu_test_result=0;
-
-              memset(
-                  &testcpu,0,sizeof(testcpu)
-              );
-
+              memset(&testcpu,0,sizeof(testcpu));
               testcpu.pc=0x2100;
               testcpu.s=0xff;
-              testcpu.p=0x04;
+              testcpu.p=F_I;
               testcpu.mpr[1]=0xf8;
-
-              memcpy(
-                  &testcpu.ram[0x100],
-                  program,
-                  sizeof(program)
-              );
-
-              for(i=0;i<6;i++) {
-                  if(cpu_single_step()<0) {
-                      cpu_test_result=-1;
-                      return;
-                  }
-              }
-
-              cpu_test_result=(
-                  testcpu.pc==0x210b &&
-                  testcpu.a==0x2b &&
-                  testcpu.x==0x2b &&
-                  testcpu.steps==6 &&
-                  testcpu.cycles==16 &&
-                  testcpu.ram[0x200]==0x2b
-              ) ? 1 : -2;
+              if(length<=sizeof(testcpu.ram)-0x100u)
+                  memcpy(&testcpu.ram[0x100],program,length);
           }
-
+          static int cpu_test_run(int steps)
+          {
+              int i;
+              for(i=0;i<steps;i++) {
+                  if(cpu_single_step()<0) return 0;
+              }
+              return 1;
+          }
+          
+          static void cpu_run_selftest(void)
+          {
+              static const unsigned char basic[]={
+                  0xa9,0x2a,0xaa,0xe8,0x8e,0x00,0x22,0xad,0x00,0x22,0xea
+              };
+              static const unsigned char alu_stack[]={
+                  0xa9,0x05,0x18,0x69,0x07,0x48,0xa9,0x01,0x68,
+                  0x38,0xe9,0x02,0xc9,0x0a,0xd0,0x02,0xa2,0x00,
+                  0xe8,0xf0,0x02,0x8d,0x00,0x23,0xea
+              };
+              static const unsigned char subroutine[]={
+                  0xa2,0x00,0x20,0x10,0x21,0x8e,0x20,0x23,
+                  0x4c,0x18,0x21,0xea,0xea,0xea,0xea,0xea,
+                  0xe8,0xe8,0x60,0xea,0xea,0xea,0xea,0xea,0xea
+              };
+              static const unsigned char mpr_program[]={
+                  0xa9,0x05,0x53,0x08,0xa9,0x00,0x43,0x08,
+                  0x8d,0x30,0x22,0xa9,0xf8,0x53,0x01,
+                  0x43,0x08,0xea
+              };
+              static const unsigned char branch_loop[]={
+                  0xa2,0x00,0xe8,0xe0,0x03,0xd0,0xfb,
+                  0x8e,0x40,0x22,0xea
+              };
+              cpu_tests_passed=0;
+              cpu_test_result=0;
+              cpu_failed_test=0;
+              cpu_test_steps=0;
+              cpu_test_cycles=0;
+          
+              cpu_test_setup(basic,sizeof(basic));
+              if(!cpu_test_run(6) || testcpu.pc!=0x210b ||
+                 testcpu.a!=0x2b || testcpu.x!=0x2b ||
+                 testcpu.ram[0x200]!=0x2b || testcpu.cycles!=16) goto fail;
+              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
+              ++cpu_tests_passed;
+          
+              cpu_test_setup(alu_stack,sizeof(alu_stack));
+              if(!cpu_test_run(15) || testcpu.pc!=0x2119 ||
+                 testcpu.a!=0x0a || testcpu.x!=1 ||
+                 testcpu.ram[0x300]!=0x0a || testcpu.ram[0x1ff]!=0x0c ||
+                 testcpu.s!=0xff || testcpu.cycles!=35) goto fail;
+              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
+              ++cpu_tests_passed;
+          
+              cpu_test_setup(subroutine,sizeof(subroutine));
+              if(!cpu_test_run(8) || testcpu.pc!=0x2119 ||
+                 testcpu.x!=2 || testcpu.ram[0x320]!=2 || testcpu.s!=0xff) goto fail;
+              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
+              ++cpu_tests_passed;
+          
+              cpu_test_setup(mpr_program,sizeof(mpr_program));
+              if(!cpu_test_run(9) || testcpu.pc!=0x2112 ||
+                 testcpu.a!=5 || testcpu.mpr[3]!=5 || testcpu.mpr[0]!=0xf8 ||
+                 testcpu.ram[0x230]!=5) goto fail;
+              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
+              ++cpu_tests_passed;
+          
+              cpu_test_setup(branch_loop,sizeof(branch_loop));
+              if(!cpu_test_run(12) || testcpu.pc!=0x210b ||
+                 testcpu.x!=3 || testcpu.ram[0x240]!=3) goto fail;
+              cpu_test_steps+=testcpu.steps;cpu_test_cycles+=testcpu.cycles;
+              ++cpu_tests_passed;
+              cpu_test_result=1;
+              return;
+          fail:
+              cpu_failed_test=cpu_tests_passed+1;
+              cpu_test_result=-cpu_failed_test;
+          }
+          
           static void select_file(void)
           {
               int n;
-
-              if(
-                  count<=0 ||
-                  selected>=count
-              ) return;
-
-              n=snprintf(
-                  full_path,
-                  sizeof(full_path),
-                  "%s%s%s",
-                  current_path,
-                  items[selected].name,
-                  items[selected].directory?"/":""
-              );
-
-              if(
-                  n<0 ||
-                  n>=(int)sizeof(full_path)
-              ) {
-                  listing_error=-120;
-                  return;
-              }
-
-              if(items[selected].directory) {
-                  strcpy(
-                      current_path,full_path
-                  );
-
-                  list_dir();
-              } else {
-                  size_rom=0;
-                  error_rom=0;
-                  read_rom=0;
-                  rom_free();
-                  screen=2;
-              }
+              if(count<=0||selected>=count)return;
+              n=snprintf(full_path,sizeof(full_path),"%s%s%s",current_path,
+                         items[selected].name,items[selected].directory?"/":"");
+              if(n<0||n>=(int)sizeof(full_path)){listing_error=-120;return;}
+              if(items[selected].directory){strcpy(current_path,full_path);list_dir();}
+              else {size_rom=0;error_rom=0;read_rom=0;rom_free();screen=2;}
           }
-
-          static void compact(
-              char *out,
-              int len,
-              const char *src
-          )
+          static void compact(char *out,int len,const char *src)
           {
               int i;
-
-              for(
-                  i=0;
-                  i<len-1 && src[i];
-                  i++
-              ) {
-                  unsigned char x=(
-                      unsigned char
-                  )src[i];
-
-                  out[i]=(
-                      x>=32 && x<127
-                  ) ? (char)toupper(x) : '_';
+              for(i=0;i<len-1 && src[i];i++) {
+                  unsigned char x=(unsigned char)src[i];
+                  out[i]=(x>=32 && x<127)?(char)toupper(x):'_';
               }
-
               out[i]=0;
           }
-
           static void draw(GSGLOBAL *gs)
           {
-              u64 bg=GS_SETREG_RGBAQ(
-                  12,20,35,0x80,0
-              );
-
-              u64 panel=GS_SETREG_RGBAQ(
-                  29,46,63,0x80,0
-              );
-
-              u64 cyan=GS_SETREG_RGBAQ(
-                  56,218,186,0x80,0
-              );
-
-              u64 white=GS_SETREG_RGBAQ(
-                  236,243,249,0x80,0
-              );
-
-              u64 muted=GS_SETREG_RGBAQ(
-                  156,179,195,0x80,0
-              );
-
+              u64 bg=GS_SETREG_RGBAQ(12,20,35,0x80,0);
+              u64 panel=GS_SETREG_RGBAQ(29,46,63,0x80,0);
+              u64 cyan=GS_SETREG_RGBAQ(56,218,186,0x80,0);
+              u64 white=GS_SETREG_RGBAQ(236,243,249,0x80,0);
+              u64 muted=GS_SETREG_RGBAQ(156,179,195,0x80,0);
               char line[100],name[40];
               int i,first;
-
               gsKit_clear(gs,bg);
-
-              gsKit_prim_sprite(
-                  gs,42,35,51,128,1,cyan
-              );
-
-              text5(
-                  gs,67,52,3,
-                  "BEETLE PCE FAST",
-                  white
-              );
-
-              text5(
-                  gs,69,100,2,
-                  "PS2 EXFAT CPU TEST V8",
-                  cyan
-              );
-
+              gsKit_prim_sprite(gs,42,35,51,128,1,cyan);
+              text5(gs,67,52,3,"BEETLE PCE FAST",white);
+              text5(gs,69,100,2,"PS2 EXFAT CPU TEST V9",cyan);
               if(screen==0) {
-                  gsKit_prim_sprite(
-                      gs,57,174,
-                      585,221,
-                      1,panel
-                  );
-
-                  text5(
-                      gs,80,185,3,
-                      "BROWSE USB ROMS",
-                      white
-                  );
-
-                  text5(
-                      gs,80,255,2,
-                      "X OPEN BROWSER",
-                      cyan
-                  );
-
-                  if(usb_error<0) {
-                      snprintf(
-                          line,sizeof(line),
-                          "USB ERROR %d",
-                          usb_error
-                      );
-
-                      text5(
-                          gs,80,312,2,
-                          line,white
-                      );
-                  }
-
+                  gsKit_prim_sprite(gs,57,174,585,221,1,panel);
+                  text5(gs,80,185,3,"BROWSE USB ROMS",white);
+                  text5(gs,80,255,2,"X OPEN BROWSER",cyan);
+                  if(usb_error<0){snprintf(line,sizeof(line),"USB ERROR %d",usb_error);text5(gs,80,312,2,line,white);}
               } else if(screen==1) {
-                  compact(
-                      name,sizeof(name),
-                      current_path
-                  );
-
-                  text5(
-                      gs,53,144,2,
-                      name,cyan
-                  );
-
+                  compact(name,sizeof(name),current_path);
+                  text5(gs,53,144,2,name,cyan);
                   first=selected-VISIBLE/2;
-
-                  if(first<0)
-                      first=0;
-
-                  if(first+VISIBLE>count)
-                      first=count-VISIBLE;
-
-                  if(first<0)
-                      first=0;
-
-                  for(
-                      i=0;
-                      i<VISIBLE &&
-                      first+i<count;
-                      i++
-                  ) {
-                      int at=first+i;
-                      int y=179+i*25;
-
-                      compact(
-                          name,25,
-                          items[at].name
-                      );
-
-                      snprintf(
-                          line,sizeof(line),
-                          "%s %s",
-                          items[at].directory
-                              ? "D" : "R",
-                          name
-                      );
-
+                  if(first<0)first=0;
+                  if(first+VISIBLE>count)first=count-VISIBLE;
+                  if(first<0)first=0;
+                  for(i=0;i<VISIBLE && first+i<count;i++) {
+                      int at=first+i,y=179+i*25;
+                      compact(name,25,items[at].name);
+                      snprintf(line,sizeof(line),"%s %s",items[at].directory?"D":"R",name);
                       if(at==selected) {
-                          gsKit_prim_sprite(
-                              gs,52,y-3,
-                              595,y+22,
-                              1,panel
-                          );
-
-                          gsKit_prim_sprite(
-                              gs,52,y-3,
-                              57,y+22,
-                              1,cyan
-                          );
+                          gsKit_prim_sprite(gs,52,y-3,595,y+22,1,panel);
+                          gsKit_prim_sprite(gs,52,y-3,57,y+22,1,cyan);
                       }
-
-                      text5(
-                          gs,66,y,2,line,
-                          at==selected
-                              ? white : muted
-                      );
+                      text5(gs,66,y,2,line,at==selected?white:muted);
                   }
-
-                  if(count==0) {
-                      text5(
-                          gs,72,200,2,
-                          "NO ROMS OR FOLDERS",
-                          white
-                      );
-                  }
-
-                  snprintf(
-                      line,sizeof(line),
-                      "ITEMS %d HIDDEN %d",
-                      count,hidden
-                  );
-
-                  text5(
-                      gs,55,395,2,
-                      line,cyan
-                  );
-
-                  text5(
-                      gs,55,420,2,
-                      "UP DOWN X OPEN O BACK",
-                      cyan
-                  );
-
+                  if(count==0)text5(gs,72,200,2,"NO ROMS OR FOLDERS",white);
+                  snprintf(line,sizeof(line),"ITEMS %d HIDDEN %d",count,hidden);
+                  text5(gs,55,395,2,line,cyan);
+                  text5(gs,55,420,2,"UP DOWN X OPEN O BACK",cyan);
               } else if(screen==2) {
-                  const char *nameptr=strrchr(
-                      full_path,'/'
-                  );
-
-                  compact(
-                      name,sizeof(name),
-                      nameptr
-                          ? nameptr+1
-                          : full_path
-                  );
-
-                  text5(
-                      gs,66,149,3,
-                      "CPU MAP PROBE V8",
-                      white
-                  );
-
-                  text5(
-                      gs,65,199,2,
-                      name,cyan
-                  );
-
-                  snprintf(
-                      line,sizeof(line),
-                      "SIZE %d READ %d",
-                      size_rom,read_rom
-                  );
-
-                  text5(
-                      gs,65,232,2,
-                      line,white
-                  );
-
-                  snprintf(
-                      line,sizeof(line),
-                      "BLOCKS %d POS %d",
-                      blocks,last_pos
-                  );
-
-                  text5(
-                      gs,65,259,2,
-                      line,white
-                  );
-
-                  snprintf(
-                      line,sizeof(line),
-                      "CRC32 %08X",
-                      disk_crc
-                  );
-
-                  text5(
-                      gs,65,286,2,
-                      line,cyan
-                  );
-
+                  const char *nameptr=strrchr(full_path,'/');
+                  compact(name,sizeof(name),nameptr?nameptr+1:full_path);
+                  text5(gs,66,149,3,"CPU MAP PROBE V9",white);
+                  text5(gs,65,199,2,name,cyan);
+                  snprintf(line,sizeof(line),"SIZE %d READ %d",size_rom,read_rom);
+                  text5(gs,65,232,2,line,white);
+                  snprintf(line,sizeof(line),"BLOCKS %d POS %d",blocks,last_pos);
+                  text5(gs,65,259,2,line,white);
+                  snprintf(line,sizeof(line),"CRC32 %08X",disk_crc);
+                  text5(gs,65,286,2,line,cyan);
                   if(loaded) {
-                      snprintf(
-                          line,sizeof(line),
-                          "BANKS %d HEADER %d",
-                          bank_count,header_skip
-                      );
-
-                      text5(
-                          gs,65,312,2,
-                          line,white
-                      );
-
-                      snprintf(
-                          line,sizeof(line),
-                          "MPR7 00 RESET %04X",
-                          vector_pc
-                      );
-
-                      text5(
-                          gs,65,337,2,
-                          line,white
-                      );
-
-                      snprintf(
-                          line,sizeof(line),
-                          "FIRST OPCODE %02X",
-                          vector_opcode
-                      );
-
-                      text5(
-                          gs,65,362,2,
-                          line,cyan
-                      );
-
-                      text5(
-                          gs,65,388,2,
-                          "ROM IN RAM MAP READY",
-                          cyan
-                      );
-
+                      snprintf(line,sizeof(line),"BANKS %d HEADER %d",bank_count,header_skip);
+                      text5(gs,65,312,2,line,white);
+                      snprintf(line,sizeof(line),"MPR7 00 RESET %04X",vector_pc);
+                      text5(gs,65,337,2,line,white);
+                      snprintf(line,sizeof(line),"FIRST OPCODE %02X",vector_opcode);
+                      text5(gs,65,362,2,line,cyan);
+                      text5(gs,65,388,2,"ROM IN RAM MAP READY",cyan);
                   } else if(error_rom) {
-                      snprintf(
-                          line,sizeof(line),
-                          "LOAD ERROR %d",
-                          error_rom
-                      );
-
-                      text5(
-                          gs,65,350,2,
-                          line,white
-                      );
-
-                  } else {
-                      text5(
-                          gs,65,350,2,
-                          "PRESS X TO LOAD ROM",
-                          cyan
-                      );
-                  }
-
-                  text5(
-                      gs,65,413,2,
-                      "X LOAD TRI CPU O BACK",
-                      muted
-                  );
-
+                      snprintf(line,sizeof(line),"LOAD ERROR %d",error_rom);
+                      text5(gs,65,350,2,line,white);
+                  } else text5(gs,65,350,2,"PRESS X TO LOAD ROM",cyan);
+                  text5(gs,65,413,2,"X LOAD TRI CPU O BACK",muted);
               } else if(screen==3) {
-                  text5(
-                      gs,64,151,3,
-                      "HUC6280 CPU SELFTEST",
-                      white
-                  );
-
-                  text5(
-                      gs,65,203,2,
-                      "SAFE RAM PROGRAM ONLY",
-                      cyan
-                  );
-
-                  snprintf(
-                      line,sizeof(line),
-                      "PC %04X STEPS %d",
-                      (unsigned)testcpu.pc,
-                      testcpu.steps
-                  );
-
-                  text5(
-                      gs,65,245,2,
-                      line,white
-                  );
-
-                  snprintf(
-                      line,sizeof(line),
-                      "A %02X X %02X Y %02X P %02X",
-                      testcpu.a,
-                      testcpu.x,
-                      testcpu.y,
-                      testcpu.p
-                  );
-
-                  text5(
-                      gs,65,273,2,
-                      line,white
-                  );
-
-                  snprintf(
-                      line,sizeof(line),
-                      "RAM2200 %02X CYCLES %d",
-                      testcpu.ram[0x200],
-                      testcpu.cycles
-                  );
-
-                  text5(
-                      gs,65,301,2,
-                      line,white
-                  );
-
-                  if(cpu_test_result==1) {
-                      text5(
-                          gs,65,347,2,
-                          "6 OPCODES PASS",
-                          cyan
-                      );
-                  } else {
-                      snprintf(
-                          line,sizeof(line),
-                          "TEST FAIL %d",
-                          cpu_test_result
-                      );
-
-                      text5(
-                          gs,65,347,2,
-                          line,white
-                      );
+                  text5(gs,64,151,3,"HUC6280 CPU TEST V9",white);
+                  text5(gs,65,200,2,"SAFE RAM PROGRAMS ONLY",cyan);
+                  snprintf(line,sizeof(line),"TESTS %d / %d PASS",cpu_tests_passed,V9_TESTS);
+                  text5(gs,65,235,2,line,white);
+                  snprintf(line,sizeof(line),"PC %04X STEPS %d",testcpu.pc,cpu_test_steps);
+                  text5(gs,65,262,2,line,white);
+                  snprintf(line,sizeof(line),"A %02X X %02X Y %02X P %02X",testcpu.a,testcpu.x,testcpu.y,testcpu.p);
+                  text5(gs,65,289,2,line,white);
+                  snprintf(line,sizeof(line),"MPR0 %02X MPR3 %02X CYC %d",testcpu.mpr[0],testcpu.mpr[3],cpu_test_cycles);
+                  text5(gs,65,316,2,line,white);
+                  if(cpu_test_result==1) text5(gs,65,353,2,"CPU TESTS PASS",cyan);
+                  else {
+                      snprintf(line,sizeof(line),"FAIL TEST %d OPC %02X",cpu_failed_test,cpu_last_opcode);
+                      text5(gs,65,353,2,line,white);
                   }
-
-                  text5(
-                      gs,65,390,2,
-                      "X RETEST O ROM VIEW",
-                      muted
-                  );
+                  text5(gs,65,388,2,"X RETEST O ROM VIEW",muted);
               }
           }
-
           int main(int argc,char **argv)
           {
               GSGLOBAL *gs;
               unsigned buttons;
-
-              (void)argc;
-              (void)argv;
-
+              (void)argc;(void)argv;
               gs=gsKit_init_global();
-
-              if(!gs)
-                  return 1;
-
+              if(!gs)return 1;
               gs->PSM=GS_PSM_CT16;
               gs->PSMZ=GS_PSMZ_16;
               gs->ZBuffering=GS_SETTING_OFF;
-
-              dmaKit_init(
-                  D_CTRL_RELE_OFF,
-                  D_CTRL_MFD_OFF,
-                  D_CTRL_STS_UNSPEC,
-                  D_CTRL_STD_OFF,
-                  D_CTRL_RCYC_8,
-                  1<<DMA_CHANNEL_GIF
-              );
-
-              dmaKit_chan_init(
-                  DMA_CHANNEL_GIF
-              );
-
+              dmaKit_init(D_CTRL_RELE_OFF,D_CTRL_MFD_OFF,D_CTRL_STS_UNSPEC,
+                          D_CTRL_STD_OFF,D_CTRL_RCYC_8,1<<DMA_CHANNEL_GIF);
+              dmaKit_chan_init(DMA_CHANNEL_GIF);
               gsKit_init_screen(gs);
-              gsKit_mode_switch(
-                  gs,GS_ONESHOT
-              );
-
+              gsKit_mode_switch(gs,GS_ONESHOT);
               pad_start();
-
               for(;;) {
                   buttons=keys_new();
-
-                  if(
-                      screen==0 &&
-                      (buttons & PAD_CROSS)
-                  ) {
+                  if(screen==0 && (buttons & PAD_CROSS)) {
                       if(!usb_ok) {
-                          draw(gs);
-                          gsKit_queue_exec(gs);
-                          gsKit_sync_flip(gs);
-
+                          draw(gs);gsKit_queue_exec(gs);gsKit_sync_flip(gs);
                           usb_error=usb_start();
                       }
-
                       if(usb_error==0) {
-                          strcpy(
-                              current_path,
-                              "mass:/"
-                          );
-
+                          strcpy(current_path,"mass:/");
                           if(list_dir()<0) {
-                              strcpy(
-                                  current_path,
-                                  "mass0:/"
-                              );
-
-                              if(list_dir()>=0)
-                                  screen=1;
-                          } else {
-                              screen=1;
-                          }
+                              strcpy(current_path,"mass0:/");
+                              if(list_dir()>=0)screen=1;
+                          } else screen=1;
                       }
-
                   } else if(screen==1) {
-                      if(
-                          (buttons & PAD_UP) &&
-                          count>0
-                      ) {
-                          selected=(
-                              selected+count-1
-                          )%count;
-                      }
-
-                      if(
-                          (buttons & PAD_DOWN) &&
-                          count>0
-                      ) {
-                          selected=(
-                              selected+1
-                          )%count;
-                      }
-
-                      if(buttons & PAD_CROSS)
-                          select_file();
-
-                      if(
-                          buttons &
-                          (PAD_CIRCLE|PAD_TRIANGLE)
-                      ) up_dir();
-
-                      if(buttons & PAD_SQUARE)
-                          list_dir();
-
+                      if((buttons & PAD_UP)&&count>0)selected=(selected+count-1)%count;
+                      if((buttons & PAD_DOWN)&&count>0)selected=(selected+1)%count;
+                      if(buttons & PAD_CROSS)select_file();
+                      if(buttons & (PAD_CIRCLE|PAD_TRIANGLE))up_dir();
+                      if(buttons & PAD_SQUARE)list_dir();
                   } else if(screen==2) {
                       if(buttons & PAD_CROSS) {
-                          draw(gs);
-                          gsKit_queue_exec(gs);
-                          gsKit_sync_flip(gs);
+                          draw(gs);gsKit_queue_exec(gs);gsKit_sync_flip(gs);
                           rom_load();
                       }
-
-                      if(
-                          (buttons & PAD_TRIANGLE) &&
-                          loaded &&
-                          mapping_ok
-                      ) {
+                      if((buttons & PAD_TRIANGLE) && loaded && mapping_ok) {
                           cpu_run_selftest();
                           screen=3;
                       }
-
-                      if(buttons & PAD_CIRCLE) {
-                          rom_free();
-                          screen=1;
-                      }
-
+                      if(buttons & PAD_CIRCLE) {rom_free();screen=1;}
                   } else if(screen==3) {
-                      if(buttons & PAD_CROSS)
-                          cpu_run_selftest();
-
-                      if(
-                          buttons &
-                          (PAD_CIRCLE|PAD_TRIANGLE)
-                      ) screen=2;
+                      if(buttons & PAD_CROSS) cpu_run_selftest();
+                      if(buttons & (PAD_CIRCLE|PAD_TRIANGLE)) screen=2;
                   }
-
-                  draw(gs);
-                  gsKit_queue_exec(gs);
-                  gsKit_sync_flip(gs);
+                  draw(gs);gsKit_queue_exec(gs);gsKit_sync_flip(gs);
               }
           }
-          END_V8_C
-
-          cat > ps2-v8/Makefile <<'END_V8_MAKE'
-          EE_BIN = Beetle-PCE-Fast-EXFAT-CPU-TEST-V8.ELF
+          END_V9_C
+          cat > ps2-v9/Makefile <<'END_V9_MAKE'
+          EE_BIN = Beetle-PCE-Fast-EXFAT-CPU-TEST-V9.ELF
           EE_OBJS = app.o exfat_bdm.o exfat_usb.o iomanx.o filexio.o
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
           EE_INCS += -I$(GSKIT)/include
@@ -1436,63 +758,60 @@ jobs:
           	rm -f $(EE_BIN) $(EE_OBJS)
           include $(PS2SDK)/samples/Makefile.pref
           include $(PS2SDK)/samples/Makefile.eeglobal
-          END_V8_MAKE
+          END_V9_MAKE
+          test -s ps2-v9/app.c
+          test -s ps2-v9/Makefile
+          grep -q 'V9_TESTS 5' ps2-v9/app.c
 
-      - name: Check generated standalone files
+      - name: Embed PS2 drivers
         shell: sh
         run: |
           set -eu
-          test -s ps2-v8/app.c
-          test -s ps2-v8/Makefile
-          grep -q 'cpu_run_selftest' ps2-v8/app.c
-          echo 'Standalone V8 source ready; no git history required.'
-
-      - name: Embed PS2 IRX modules
-        shell: sh
-        run: |
-          set -eu
-          cd ps2-v8
+          cd ps2-v9
           bin2c usbd.irx exfat_bdm.c exfat_bdm_irx
           bin2c usbhdfsd.irx exfat_usb.c exfat_usb_irx
           bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
           bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
 
-      - name: Compile PS2 ELF
-        working-directory: ps2-v8
+      - name: Compile PS2 V9 ELF
+        working-directory: ps2-v9
         shell: sh
         run: |
           if make -j2 > build.log 2>&1; then
-            ls -lh Beetle-PCE-Fast-EXFAT-CPU-TEST-V8.ELF
+            ls -lh Beetle-PCE-Fast-EXFAT-CPU-TEST-V9.ELF
           else
-            cat build.log
+            grep -n -m 40 -E 'error:|undefined reference|No such file|cannot find' build.log || true
+            tail -n 130 build.log
             exit 1
           fi
 
-      - name: Verify MIPS ELF
-        working-directory: ps2-v8
+      - name: Check executable MIPS ELF
+        working-directory: ps2-v9
+        shell: sh
         run: |
           python3 - <<'PY'
-          import pathlib, struct
-          f = pathlib.Path('Beetle-PCE-Fast-EXFAT-CPU-TEST-V8.ELF')
-          b = f.read_bytes()[:20]
-          assert b[:4] == b'\x7fELF'
-          assert b[4:6] == bytes([1, 1])
-          assert struct.unpack_from('<H', b, 18)[0] == 8
-          print('PS2 MIPS ELF OK:', f.stat().st_size)
+          import struct
+          from pathlib import Path
+          p=Path('Beetle-PCE-Fast-EXFAT-CPU-TEST-V9.ELF')
+          h=p.read_bytes()[:20]
+          assert h[:4]==b'\x7fELF', 'ELF header missing'
+          assert h[4:6]==bytes((1,1)), 'Must be 32-bit little-endian'
+          assert struct.unpack_from('<H',h,18)[0]==8, 'Not MIPS'
+          print('PS2-compatible MIPS ELF header:',p.stat().st_size,'bytes')
           PY
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-V8-build-log
-          path: ps2-v8/build.log
+          name: Beetle-V9-build-log
+          path: ps2-v9/build.log
           if-no-files-found: warn
 
-      - name: Upload ELF
+      - name: Upload PS2 V9 ELF
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-PCE-Fast-EXFAT-CPU-TEST-V8
-          path: ps2-v8/Beetle-PCE-Fast-EXFAT-CPU-TEST-V8.ELF
+          name: Beetle-PCE-Fast-EXFAT-CPU-TEST-V9
+          path: ps2-v9/Beetle-PCE-Fast-EXFAT-CPU-TEST-V9.ELF
           if-no-files-found: error
