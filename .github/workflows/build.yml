@@ -403,7 +403,6 @@ jobs:
             }
           }
           int main(int argc,char **argv) {
-            int r;
             (void)argc;(void)argv;
             gs=gsKit_init_global();
             if(!gs)return 1;
@@ -416,7 +415,7 @@ jobs:
             gsKit_init_screen(gs);
             gsKit_mode_switch(gs,GS_ONESHOT);
             memset(&tex,0,sizeof(tex));
-            tex.Width=TEX_SIZE;tex.Height=TEX_SIZE;tex.PSM=GS_PSM_CT32;tex.Mem=pixels;
+            tex.Width=TEX_SIZE;tex.Height=TEX_SIZE;tex.PSM=GS_PSM_CT32;tex.Mem=(u32 *)pixels;
             tex.Vram=gsKit_vram_alloc(gs,gsKit_texture_size(TEX_SIZE,TEX_SIZE,GS_PSM_CT32),GSKIT_ALLOC_USERBUFFER);
             SifInitRpc(0);
             SifLoadModule("rom0:XSIO2MAN",0,NULL);
