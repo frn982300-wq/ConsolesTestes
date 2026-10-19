@@ -1,4 +1,4 @@
-name: Beetle PCE Fast PS2 exFAT CPU Tests V9
+name: Beetle PCE Fast PS2 exFAT Real ROM Trace V10
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build V9 HuC6280 CPU diagnostic
+    name: Build V10 actual game ROM bootstrap trace
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -29,28 +29,28 @@ jobs:
         shell: sh
         run: |
           set -eu
-          mkdir -p ps2-v9
+          mkdir -p ps2-v10
           test -s FCEUmm-PS2-exFAT-integrated-2026.zip
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
             FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx \
-            > ps2-v9/usbd.irx
+            > ps2-v10/usbd.irx
           unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
             FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx \
-            > ps2-v9/usbhdfsd.irx
-          test -s ps2-v9/usbd.irx
-          test -s ps2-v9/usbhdfsd.irx
+            > ps2-v10/usbhdfsd.irx
+          test -s ps2-v10/usbd.irx
+          test -s ps2-v10/usbhdfsd.irx
           test -s "$PS2SDK/iop/irx/iomanX.irx"
           test -s "$PS2SDK/iop/irx/fileXio.irx"
           command -v bin2c
 
-      - name: Generate standalone V9 source
+      - name: Generate standalone V10 source
         shell: sh
         run: |
           set -eu
-          mkdir -p ps2-v9
-          cat > ps2-v9/app.c <<'END_V9_C'
-          /* PS2 exFAT V9: ROM browser, HuC6280 bank mapping and test CPU.
-           * Only isolated synthetic test programs execute; games do not.
+          mkdir -p ps2-v10
+          cat > ps2-v10/app.c <<'END_V10_C'
+          /* PS2 exFAT V10: real-ROM bounded instruction trace (not game emulation).
+           * V9 synthetic tests plus bounded real-ROM trace; not a playable emulator.
            * Keeps the working V8 read-only USB and gamepad routines. */
           #include <gsKit.h>
           #include <dmaKit.h>
@@ -340,21 +340,88 @@ jobs:
           static int cpu_test_cycles=0;
           static unsigned char cpu_last_opcode=0;
           
+          /* Real ROM bootstrap trace. This is a LIMITED decoder from V9, not Beetle core.
+           * Trace never talks to emulated hardware: unknown I/O/unmapped accesses HALT.
+           * Only MPR7 is defined by a real reset. Other MPRs use 00 for this probe.
+           */
+          #define TRACE_MAX_STEPS 96
+          #define TRACE_UNSUPPORTED 1
+          #define TRACE_IO_READ 2
+          #define TRACE_IO_WRITE 3
+          #define TRACE_ROM_WRITE 4
+          #define TRACE_UNMAPPED_READ 5
+          #define TRACE_UNMAPPED_WRITE 6
+          #define TRACE_UNSUPPORTED_ALU 7
+          #define TRACE_STEP_LIMIT 8
+          #define TRACE_NO_ROM 9
+          static int trace_enabled=0;
+          static int trace_reason=0;
+          static unsigned short trace_address=0;
+          static unsigned char trace_bank=0;
+          static unsigned short trace_last_pc=0;
+          static unsigned char trace_last_op=0;
+          static unsigned short trace_history_pc[8];
+          static unsigned char trace_history_op[8];
+          static int trace_history_count=0;
+          static int trace_limit_used=0;
+          static void trace_fail(int reason,unsigned short addr,unsigned char bank)
+          {
+              if(trace_enabled && !trace_reason) {
+                  trace_reason=reason;
+                  trace_address=addr;
+                  trace_bank=bank;
+              }
+          }
+          static const char *trace_reason_text(int reason)
+          {
+              switch(reason) {
+              case TRACE_UNSUPPORTED: return "UNSUPPORTED OPCODE";
+              case TRACE_IO_READ: return "IO READ NOT EMULATED";
+              case TRACE_IO_WRITE: return "IO WRITE NOT EMULATED";
+              case TRACE_ROM_WRITE: return "ROM WRITE NOT EMULATED";
+              case TRACE_UNMAPPED_READ: return "UNMAPPED READ";
+              case TRACE_UNMAPPED_WRITE: return "UNMAPPED WRITE";
+              case TRACE_UNSUPPORTED_ALU: return "DECIMAL OR T FLAG ALU";
+              case TRACE_STEP_LIMIT: return "STEP LIMIT REACHED";
+              case TRACE_NO_ROM: return "NO ROM MAPPED";
+              default: return "NOT RUN";
+              }
+          }
+          
           static unsigned char cpu_mem_read(unsigned short addr)
           {
               unsigned page=((unsigned)addr)>>13;
               unsigned bank=testcpu.mpr[page];
               unsigned offset=((unsigned)addr)&8191u;
               unsigned location;
-              if(bank==0xf8) return testcpu.ram[offset];
-              if(!rom || bank >= (unsigned)bank_count) return 0xff;
+              if(bank>=0xf8 && bank<=0xfb) return testcpu.ram[offset];
+              if(trace_enabled && bank==0xff) {
+                  trace_fail(TRACE_IO_READ,addr,(unsigned char)bank);
+                  return 0xff;
+              }
+              if(!rom || bank >= (unsigned)bank_count) {
+                  trace_fail(TRACE_UNMAPPED_READ,addr,(unsigned char)bank);
+                  return 0xff;
+              }
               location=(unsigned)header_skip+bank*8192u+offset;
-              return location<(unsigned)size_rom ? rom[location] : 0xff;
+              if(location >= (unsigned)size_rom) {
+                  trace_fail(TRACE_UNMAPPED_READ,addr,(unsigned char)bank);
+                  return 0xff;
+              }
+              return rom[location];
           }
           static void cpu_mem_write(unsigned short addr,unsigned char val)
           {
-              if(testcpu.mpr[((unsigned)addr)>>13]==0xf8)
+              unsigned bank=testcpu.mpr[((unsigned)addr)>>13];
+              if(bank>=0xf8 && bank<=0xfb) {
                   testcpu.ram[((unsigned)addr)&8191u]=val;
+              } else if(bank==0xff) {
+                  trace_fail(TRACE_IO_WRITE,addr,(unsigned char)bank);
+              } else if(bank<(unsigned)bank_count) {
+                  trace_fail(TRACE_ROM_WRITE,addr,(unsigned char)bank);
+              } else {
+                  trace_fail(TRACE_UNMAPPED_WRITE,addr,(unsigned char)bank);
+              }
           }
           static unsigned char cpu_fetch(void)
           {
@@ -423,6 +490,7 @@ jobs:
           static int cpu_single_step(void)
           {
               unsigned char op=cpu_fetch();
+              if(trace_enabled && trace_reason) return -1;
               unsigned short addr;
               unsigned char value,mask;
               unsigned i;
@@ -454,8 +522,18 @@ jobs:
               case 0x38: testcpu.p|=F_C;testcpu.cycles+=2;break;
               case 0x58: testcpu.p=(unsigned char)(testcpu.p&~F_I);testcpu.cycles+=2;break;
               case 0x78: testcpu.p|=F_I;testcpu.cycles+=2;break;
-              case 0x69: cpu_adc(cpu_fetch());testcpu.cycles+=2;break;
-              case 0xe9: cpu_sbc(cpu_fetch());testcpu.cycles+=2;break;
+              case 0x69:
+                  if(trace_enabled && (testcpu.p&(F_D|0x20))) {
+                      trace_fail(TRACE_UNSUPPORTED_ALU,testcpu.pc,testcpu.mpr[testcpu.pc>>13]);
+                      return -1;
+                  }
+                  cpu_adc(cpu_fetch());testcpu.cycles+=2;break;
+              case 0xe9:
+                  if(trace_enabled && (testcpu.p&(F_D|0x20))) {
+                      trace_fail(TRACE_UNSUPPORTED_ALU,testcpu.pc,testcpu.mpr[testcpu.pc>>13]);
+                      return -1;
+                  }
+                  cpu_sbc(cpu_fetch());testcpu.cycles+=2;break;
               case 0xc9: cpu_compare(testcpu.a,cpu_fetch());testcpu.cycles+=2;break;
               case 0xe0: cpu_compare(testcpu.x,cpu_fetch());testcpu.cycles+=2;break;
               case 0xc0: cpu_compare(testcpu.y,cpu_fetch());testcpu.cycles+=2;break;
@@ -496,8 +574,10 @@ jobs:
                   break;
               default:
                   testcpu.error=(int)op;
+                  trace_fail(TRACE_UNSUPPORTED,trace_last_pc,testcpu.mpr[trace_last_pc>>13]);
                   return -1;
               }
+              if(trace_enabled && trace_reason) return -1;
               ++testcpu.steps;
               return 0;
           }
@@ -591,6 +671,56 @@ jobs:
               cpu_test_result=-cpu_failed_test;
           }
           
+          
+          /* Execute a bounded trace FROM THE REAL ROM RESET VECTOR, not synthetic RAM.
+           * We intentionally stop rather than invent VDC/VCE/PSG/IRQ behaviour.
+           * Tests do not mutate the USB device; the ROM is already in PS2 RAM.
+           */
+          static void trace_run_rom(void)
+          {
+              int n,rc;
+              trace_enabled=0;
+              trace_reason=0;
+              trace_last_pc=0;
+              trace_last_op=0;
+              trace_address=0;
+              trace_bank=0;
+              trace_history_count=0;
+              trace_limit_used=0;
+              memset(&testcpu,0,sizeof(testcpu));
+              if(!loaded || !mapping_ok || !rom) {
+                  trace_reason=TRACE_NO_ROM;
+                  return;
+              }
+              testcpu.pc=(unsigned short)vector_pc;
+              testcpu.s=0xff;
+              testcpu.p=F_I;
+              testcpu.mpr[7]=0;
+              /* Hardware leaves MPR0..6 undefined at reset; 00 is a probe assumption. */
+              trace_enabled=1;
+              for(n=0;n<TRACE_MAX_STEPS;n++) {
+                  unsigned short here=testcpu.pc;
+                  unsigned char opcode=cpu_mem_read(here);
+                  if(trace_reason) break;
+                  trace_last_pc=here;
+                  trace_last_op=opcode;
+                  trace_history_pc[trace_history_count%8]=here;
+                  trace_history_op[trace_history_count%8]=opcode;
+                  ++trace_history_count;
+                  rc=cpu_single_step();
+                  if(trace_reason) break;
+                  if(rc<0) {
+                      trace_fail(TRACE_UNSUPPORTED,here,testcpu.mpr[here>>13]);
+                      break;
+                  }
+              }
+              if(!trace_reason) {
+                  trace_reason=TRACE_STEP_LIMIT;
+                  trace_limit_used=1;
+              }
+              trace_enabled=0;
+          }
+          
           static void select_file(void)
           {
               int n;
@@ -622,7 +752,7 @@ jobs:
               gsKit_clear(gs,bg);
               gsKit_prim_sprite(gs,42,35,51,128,1,cyan);
               text5(gs,67,52,3,"BEETLE PCE FAST",white);
-              text5(gs,69,100,2,"PS2 EXFAT CPU TEST V9",cyan);
+              text5(gs,69,100,2,"PS2 EXFAT ROM TRACE V10",cyan);
               if(screen==0) {
                   gsKit_prim_sprite(gs,57,174,585,221,1,panel);
                   text5(gs,80,185,3,"BROWSE USB ROMS",white);
@@ -652,7 +782,7 @@ jobs:
               } else if(screen==2) {
                   const char *nameptr=strrchr(full_path,'/');
                   compact(name,sizeof(name),nameptr?nameptr+1:full_path);
-                  text5(gs,66,149,3,"CPU MAP PROBE V9",white);
+                  text5(gs,66,149,3,"ROM BOOT PROBE V10",white);
                   text5(gs,65,199,2,name,cyan);
                   snprintf(line,sizeof(line),"SIZE %d READ %d",size_rom,read_rom);
                   text5(gs,65,232,2,line,white);
@@ -672,9 +802,9 @@ jobs:
                       snprintf(line,sizeof(line),"LOAD ERROR %d",error_rom);
                       text5(gs,65,350,2,line,white);
                   } else text5(gs,65,350,2,"PRESS X TO LOAD ROM",cyan);
-                  text5(gs,65,413,2,"X LOAD TRI CPU O BACK",muted);
+                  text5(gs,65,413,2,"X LOAD TRI CPU SQR TRACE O BACK",muted);
               } else if(screen==3) {
-                  text5(gs,64,151,3,"HUC6280 CPU TEST V9",white);
+                  text5(gs,64,151,3,"HUC6280 CPU TEST V10",white);
                   text5(gs,65,200,2,"SAFE RAM PROGRAMS ONLY",cyan);
                   snprintf(line,sizeof(line),"TESTS %d / %d PASS",cpu_tests_passed,V9_TESTS);
                   text5(gs,65,235,2,line,white);
@@ -690,6 +820,28 @@ jobs:
                       text5(gs,65,353,2,line,white);
                   }
                   text5(gs,65,388,2,"X RETEST O ROM VIEW",muted);
+              } else if(screen==4) {
+                  int last=trace_history_count-1;
+                  text5(gs,65,149,3,"REAL ROM TRACE V10",white);
+                  text5(gs,65,191,2,"NO VIDEO OR AUDIO EMULATION",muted);
+                  snprintf(line,sizeof(line),"RESET %04X MPR7 00",vector_pc);
+                  text5(gs,65,219,2,line,cyan);
+                  snprintf(line,sizeof(line),"STEPS %d CYC %d",testcpu.steps,testcpu.cycles);
+                  text5(gs,65,245,2,line,white);
+                  text5(gs,65,271,2,trace_reason_text(trace_reason),cyan);
+                  snprintf(line,sizeof(line),"PC %04X OP %02X",trace_last_pc,trace_last_op);
+                  text5(gs,65,297,2,line,white);
+                  snprintf(line,sizeof(line),"MPR1 %02X MPR2 %02X MPR7 %02X",
+                           testcpu.mpr[1],testcpu.mpr[2],testcpu.mpr[7]);
+                  text5(gs,65,323,2,line,white);
+                  snprintf(line,sizeof(line),"ADDR %04X BANK %02X",trace_address,trace_bank);
+                  text5(gs,65,349,2,line,white);
+                  if(last>=0) {
+                      int ix=last%8;
+                      snprintf(line,sizeof(line),"LAST %04X %02X",trace_history_pc[ix],trace_history_op[ix]);
+                      text5(gs,65,375,2,line,cyan);
+                  }
+                  text5(gs,65,410,2,"X RETEST O BACK",muted);
               }
           }
           int main(int argc,char **argv)
@@ -737,17 +889,24 @@ jobs:
                           cpu_run_selftest();
                           screen=3;
                       }
+                      if((buttons & PAD_SQUARE) && loaded && mapping_ok) {
+                          trace_run_rom();
+                          screen=4;
+                      }
                       if(buttons & PAD_CIRCLE) {rom_free();screen=1;}
                   } else if(screen==3) {
                       if(buttons & PAD_CROSS) cpu_run_selftest();
+                      if(buttons & (PAD_CIRCLE|PAD_TRIANGLE)) screen=2;
+                  } else if(screen==4) {
+                      if(buttons & PAD_CROSS) trace_run_rom();
                       if(buttons & (PAD_CIRCLE|PAD_TRIANGLE)) screen=2;
                   }
                   draw(gs);gsKit_queue_exec(gs);gsKit_sync_flip(gs);
               }
           }
-          END_V9_C
-          cat > ps2-v9/Makefile <<'END_V9_MAKE'
-          EE_BIN = Beetle-PCE-Fast-EXFAT-CPU-TEST-V9.ELF
+          END_V10_C
+          cat > ps2-v10/Makefile <<'END_V10_MAKE'
+          EE_BIN = Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10.ELF
           EE_OBJS = app.o exfat_bdm.o exfat_usb.o iomanx.o filexio.o
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
           EE_INCS += -I$(GSKIT)/include
@@ -758,27 +917,28 @@ jobs:
           	rm -f $(EE_BIN) $(EE_OBJS)
           include $(PS2SDK)/samples/Makefile.pref
           include $(PS2SDK)/samples/Makefile.eeglobal
-          END_V9_MAKE
-          test -s ps2-v9/app.c
-          test -s ps2-v9/Makefile
-          grep -q 'V9_TESTS 5' ps2-v9/app.c
+          END_V10_MAKE
+          test -s ps2-v10/app.c
+          test -s ps2-v10/Makefile
+          grep -q 'TRACE_MAX_STEPS 96' ps2-v10/app.c
+          grep -q 'V9_TESTS 5' ps2-v10/app.c
 
       - name: Embed PS2 drivers
         shell: sh
         run: |
           set -eu
-          cd ps2-v9
+          cd ps2-v10
           bin2c usbd.irx exfat_bdm.c exfat_bdm_irx
           bin2c usbhdfsd.irx exfat_usb.c exfat_usb_irx
           bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
           bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
 
-      - name: Compile PS2 V9 ELF
-        working-directory: ps2-v9
+      - name: Compile PS2 V10 ELF
+        working-directory: ps2-v10
         shell: sh
         run: |
           if make -j2 > build.log 2>&1; then
-            ls -lh Beetle-PCE-Fast-EXFAT-CPU-TEST-V9.ELF
+            ls -lh Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10.ELF
           else
             grep -n -m 40 -E 'error:|undefined reference|No such file|cannot find' build.log || true
             tail -n 130 build.log
@@ -786,13 +946,13 @@ jobs:
           fi
 
       - name: Check executable MIPS ELF
-        working-directory: ps2-v9
+        working-directory: ps2-v10
         shell: sh
         run: |
           python3 - <<'PY'
           import struct
           from pathlib import Path
-          p=Path('Beetle-PCE-Fast-EXFAT-CPU-TEST-V9.ELF')
+          p=Path('Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10.ELF')
           h=p.read_bytes()[:20]
           assert h[:4]==b'\x7fELF', 'ELF header missing'
           assert h[4:6]==bytes((1,1)), 'Must be 32-bit little-endian'
@@ -804,14 +964,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-V9-build-log
-          path: ps2-v9/build.log
+          name: Beetle-V10-build-log
+          path: ps2-v10/build.log
           if-no-files-found: warn
 
-      - name: Upload PS2 V9 ELF
+      - name: Upload PS2 V10 ELF
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Beetle-PCE-Fast-EXFAT-CPU-TEST-V9
-          path: ps2-v9/Beetle-PCE-Fast-EXFAT-CPU-TEST-V9.ELF
+          name: Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10
+          path: ps2-v10/Beetle-PCE-Fast-EXFAT-ROM-TRACE-V10.ELF
           if-no-files-found: error
