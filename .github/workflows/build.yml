@@ -3,8 +3,7 @@ name: Build FCEUmm PS2 exFAT
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -29,42 +28,74 @@ jobs:
 
       - name: Extract source package
         run: |
-          test -f FCEUmm-PS2-exFAT-source.zip
+          set -eu
+          test -s FCEUmm-PS2-exFAT-source.zip
           unzip -q FCEUmm-PS2-exFAT-source.zip
           test -f FCEUmm-PS2-exFAT/Makefile.ps2
           test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx
           test -s FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx
-          echo "Source package extracted successfully"
+          echo "Source files extracted successfully"
 
       - name: Verify PS2 toolchain
         run: |
-          echo "PS2SDK=$PS2SDK"
-          echo "GSKIT=$GSKIT"
+          set -eu
           test -d "$PS2SDK"
           test -d "$GSKIT"
           command -v mips64r5900el-ps2-elf-gcc
           command -v bin2c
 
-      - name: Patch legacy PS2SDK compatibility
+      - name: Patch legacy PS2SDK source
         working-directory: FCEUmm-PS2-exFAT
         run: |
-          set -eu
-          sed -i '/^PLATFORM_DEFINES = /s/$/ -DNEWLIB_PORT_AWARE/' Makefile.ps2
-          grep -q -- '-DNEWLIB_PORT_AWARE' Makefile.ps2
-          sed -i 's/fio_dirent_t buf;/io_dirent_t buf;/' src/drivers/ps2/browser.c
-          grep -q 'io_dirent_t buf;' src/drivers/ps2/browser.c
-          echo "Legacy PS2SDK compatibility patches applied"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          makefile = Path('Makefile.ps2')
+          lines = makefile.read_text().splitlines(keepends=True)
+          found = False
+          for index, line in enumerate(lines):
+              if line.startswith('PLATFORM_DEFINES ='):
+                  lines[index] = line.rstrip('\n') + ' -DNEWLIB_PORT_AWARE\n'
+                  found = True
+                  break
+          if not found:
+              raise RuntimeError('PLATFORM_DEFINES was not found')
+          makefile.write_text(''.join(lines))
+
+          browser = Path('src/drivers/ps2/browser.c')
+          source = browser.read_text()
+          if 'fio_dirent_t buf;' not in source:
+              raise RuntimeError('Expected legacy directory type was not found')
+          source = source.replace('fio_dirent_t buf;', 'io_dirent_t buf;', 1)
+          browser.write_text(source)
+
+          config = Path('src/drivers/ps2/cnfsettings.c')
+          source = config.read_text()
+          for declaration in ('int true = 1;\n', 'int false = 0;\n'):
+              if declaration not in source:
+                  raise RuntimeError('Expected legacy Boolean declaration was not found')
+              source = source.replace(declaration, '', 1)
+          source = source.replace("(tp!='\\0')", "(*tp!='\\0')")
+          for header in ('<stdlib.h>', '<fileio.h>', '<sys/fcntl.h>'):
+              if '#include ' + header not in source:
+                  source = '#include ' + header + '\n' + source
+          config.write_text(source)
+          print('Legacy PS2SDK compatibility patches applied')
+          PY
 
       - name: Build PS2 ELF
         working-directory: FCEUmm-PS2-exFAT
         shell: sh
         run: |
-          set -eu
-          make -f Makefile.ps2 NOT_PACKED=1 -j1 > build.log 2>&1 || {
-            cat build.log
+          if make -f Makefile.ps2 NOT_PACKED=1 -j1 > build.log 2>&1; then
+            tail -n 40 build.log
+          else
+            echo "Build failed. Relevant compiler messages:"
+            grep -n -E 'error:|undefined reference|No such file|Error [0-9]+' build.log || true
+            echo "Last 160 lines of build log:"
+            tail -n 160 build.log
             exit 1
-          }
-          tail -n 40 build.log
+          fi
 
       - name: Verify ELF output
         run: |
