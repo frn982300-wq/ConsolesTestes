@@ -65,7 +65,7 @@ jobs:
           grep -q '#include <malloc.h>' src/drivers/ps2/main.c
           grep -q '#include <stdlib.h>' src/drivers/ps2/ps2font.c
           grep -q '#include <string.h>' src/drivers/ps2/menu.c
-          echo "Source patches and exFAT driver files are present."
+          echo "Compatibility patches and drivers verified."
 
       - name: Fix CopyFami name ownership
         working-directory: FCEUmm-PS2-exFAT
@@ -91,14 +91,14 @@ jobs:
           if before in code:
               code = code.replace(before, after, 1)
               path.write_text(code)
-              print('CopyFami name allocation fixed.')
+              print('CopyFami allocation fixed.')
           elif 'malloc(sizeof("copyfami"))' in code:
-              print('CopyFami name allocation already fixed.')
+              print('CopyFami already fixed.')
           else:
-              raise RuntimeError('Expected CopyFami assignment not found.')
+              raise RuntimeError('CopyFami assignment not found.')
           PY
 
-      - name: Fix legacy network function declarations
+      - name: Fix legacy network declarations
         working-directory: FCEUmm-PS2-exFAT
         run: |
           python3 - <<'PYCODE'
@@ -134,7 +134,7 @@ jobs:
 
                   if not match:
                       raise RuntimeError(
-                          f'Missing netplay.h include in {filename}'
+                          f'Missing netplay.h include: {filename}'
                       )
 
                   source = (
@@ -146,12 +146,10 @@ jobs:
 
                   path.write_text(source)
 
-              print(
-                  f'Verified legacy network declarations: {filename}'
-              )
+              print(f'Network declarations verified: {filename}')
           PYCODE
 
-      - name: Fix FDS audio function declaration
+      - name: Fix FDS audio declaration
         working-directory: FCEUmm-PS2-exFAT
         run: |
           python3 - <<'PYCODE'
@@ -166,11 +164,48 @@ jobs:
           if old in source:
               source = source.replace(old, new, 1)
               path.write_text(source)
-              print('FDS audio declaration updated.')
+              print('FDS audio declaration fixed.')
           elif new in source:
-              print('FDS audio declaration already updated.')
+              print('FDS audio already fixed.')
           else:
-              raise RuntimeError('FDS audio declaration not found.')
+              raise RuntimeError('FDS declaration not found.')
+          PYCODE
+
+      - name: Fix legacy asprintf availability
+        working-directory: FCEUmm-PS2-exFAT
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+
+          path = Path('Makefile.ps2')
+          source = path.read_text()
+
+          if '-DHAVE_ASPRINTF' not in source:
+              raise RuntimeError(
+                  'Expected HAVE_ASPRINTF flag not found.'
+              )
+
+          source = source.replace(
+              '-DHAVE_ASPRINTF',
+              '',
+              1
+          )
+
+          path.write_text(source)
+
+          general = Path('src/general.c').read_text()
+
+          if '#ifndef HAVE_ASPRINTF' not in general:
+              raise RuntimeError(
+                  'Missing built-in asprintf fallback.'
+              )
+
+          if 'static int asprintf(' not in general:
+              raise RuntimeError(
+                  'Missing legacy asprintf implementation.'
+              )
+
+          print('Built-in asprintf implementation enabled.')
           PYCODE
 
       - name: Compile PS2 ELF
@@ -180,10 +215,11 @@ jobs:
           set -eu
 
           if make -f Makefile.ps2 NOT_PACKED=1 -j1 > build.log 2>&1; then
-            echo "PS2 build completed."
+            echo "PS2 build completed successfully."
             tail -n 50 build.log
           else
-            echo "PS2 build failed. First compiler or linker errors:"
+            echo "PS2 compilation failed."
+            echo "Compiler and linker errors:"
 
             grep -n -m 40 -E 'fatal error:|error:|undefined reference|No such file|Error [0-9]+' build.log || true
 
@@ -206,13 +242,13 @@ jobs:
           path = Path('fceu.elf')
           header = path.read_bytes()[:20]
 
-          assert header[:4] == b'\x7fELF', 'Output is not an ELF.'
+          assert header[:4] == b'\x7fELF', 'Not an ELF file.'
           assert header[4] == 1, 'Expected ELF32.'
           assert header[5] == 1, 'Expected little-endian ELF.'
           assert struct.unpack_from('<H', header, 18)[0] == 8, 'Expected MIPS ELF.'
 
           print(
-              f'Validated PS2 MIPS ELF: {path.stat().st_size} bytes'
+              f'Validated PS2 ELF: {path.stat().st_size} bytes'
           )
           PY
 
