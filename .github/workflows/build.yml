@@ -80,7 +80,57 @@ jobs:
               if '#include ' + header not in source:
                   source = '#include ' + header + '\n' + source
           config.write_text(source)
-          print('Legacy PS2SDK compatibility patches applied')
+
+          main = Path('src/drivers/ps2/main.c')
+          source = main.read_text()
+          if source.count('#include <libjpg.h>') != 1:
+              raise RuntimeError('Expected legacy JPEG header was not found')
+          source = source.replace('#include <libjpg.h>\n', '', 1)
+          if '#include <stdlib.h>' not in source:
+              source = '#include <stdlib.h>\n' + source
+
+          start = source.find('    // Setup GUI Textures\n')
+          end = source.find('    if (!(ret = FCEUI_Initialize()))', start)
+          if start == -1 or end == -1 or 'jpgOpenFILE' not in source[start:end]:
+              raise RuntimeError('Legacy JPEG loading section was not found')
+
+          replacement = '''    // Setup GUI Textures
+              if (strstr(FCEUSkin.bgTexture, ".png") != NULL) {
+                  if (gsKit_texture_png(gsGlobal, &BG_TEX, FCEUSkin.bgTexture) < 0) {
+                      printf("Error loading browser background PNG!\\n");
+                      bgtex = 1;
+                  }
+              } else if (strstr(FCEUSkin.bgTexture, ".jpg") != NULL ||
+                         strstr(FCEUSkin.bgTexture, ".jpeg") != NULL) {
+                  if (gsKit_texture_jpeg(gsGlobal, &BG_TEX, FCEUSkin.bgTexture) < 0) {
+                      printf("Error loading browser background JPEG!\\n");
+                      bgtex = 1;
+                  }
+              } else {
+                  bgtex = 1;
+              }
+
+              if (strstr(FCEUSkin.bgMenu, ".png") != NULL) {
+                  if (gsKit_texture_png(gsGlobal, &MENU_TEX, FCEUSkin.bgMenu) < 0) {
+                      printf("Error loading menu background PNG!\\n");
+                      menutex = 1;
+                  }
+              } else if (strstr(FCEUSkin.bgMenu, ".jpg") != NULL ||
+                         strstr(FCEUSkin.bgMenu, ".jpeg") != NULL) {
+                  if (gsKit_texture_jpeg(gsGlobal, &MENU_TEX, FCEUSkin.bgMenu) < 0) {
+                      printf("Error loading menu background JPEG!\\n");
+                      menutex = 1;
+                  }
+              } else {
+                  menutex = 1;
+              }
+
+          '''
+          source = source[:start] + replacement + source[end:]
+          if 'jpgOpenFILE' in source or '#include <libjpg.h>' in source:
+              raise RuntimeError('Legacy JPEG calls still remain')
+          main.write_text(source)
+          print('PS2SDK and gsKit JPEG compatibility patches applied')
           PY
 
       - name: Build PS2 ELF
