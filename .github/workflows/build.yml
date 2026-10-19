@@ -1,16 +1,38 @@
 name: Build PS2 exFAT
-on: [push]
+
+on:
+  push:
+    branches: [ main, principal ]
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: ps2dev/ps2dev:latest
+    container:
+      image: ps2dev/ps2dev:latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - name: Compilador
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download FCEUmm
         run: |
-          apt-get update && apt-get install -y make
-          make -f Makefile.ps2
-      - uses: actions/upload-artifact@v4
+          git clone --depth 1 https://github.com/libretro/fceumm.git fceumm
+          ls -la fceumm
+
+      - name: Build PS2
+        run: |
+          cd fceumm
+          make -f Makefile.libretro platform=ps2 -j4
+
+      - name: Find ELF
+        run: |
+          find . -name "*.elf" -o -name "*.ELF"
+          ls -lh fceumm/*.elf || ls -lh *.elf || true
+
+      - name: Upload ELF
+        uses: actions/upload-artifact@v4
         with:
-          name: fceumm-ps2-exfat
-          path: "*.elf"
+          name: fceumm-ps2
+          path: |
+            **/*.elf
+          if-no-files-found: warn
