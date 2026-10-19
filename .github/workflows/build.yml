@@ -1,5 +1,5 @@
 
-name: Build Original FCEUmm PS2 0.3.3
+name: Diagnose Original FCEUmm PS2 0.3.3
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Build unmodified PS2 source
+    name: Build original PS2 source
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
@@ -19,69 +19,88 @@ jobs:
       image: ps2dev/ps2dev:latest
 
     steps:
-      - name: Checkout original source
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build utilities
-        run: |
-          apk add --no-cache make build-base
-
-      - name: Verify original source and toolchain
+      - name: Install build tools
         run: |
           set -eu
-          test -f Makefile.ps2
-          test -f src/drivers/ps2/init.c
-          test -d "$PS2SDK"
-          test -d "$GSKIT"
-          command -v mips64r5900el-ps2-elf-gcc
-          command -v bin2c
-          echo "Original source detected. No source patches will be applied."
+          apk add --no-cache make build-base
 
-      - name: Compile original FCEUmm ELF
+      - name: Check source files and toolchain
+        shell: sh
+        run: |
+          set -eu
+          echo "Current directory:"
+          pwd
+          echo "Repository contents:"
+          ls -la
+
+          for file in Makefile.ps2 src/drivers/ps2/init.c; do
+            if test -f "$file"; then
+              echo "FOUND: $file"
+            else
+              echo "ERROR: Missing original source file: $file"
+              echo "Possible Makefiles:"
+              find . -maxdepth 4 -name Makefile.ps2 -print
+              exit 1
+            fi
+          done
+
+          for variable in PS2SDK GSKIT; do
+            eval "directory=\${$variable:-}"
+            if test -n "$directory" && test -d "$directory"; then
+              echo "FOUND: $variable=$directory"
+            else
+              echo "ERROR: Missing or invalid $variable directory"
+              exit 1
+            fi
+          done
+
+          for tool in mips64r5900el-ps2-elf-gcc bin2c make; do
+            if command -v "$tool"; then
+              echo "FOUND: $tool"
+            else
+              echo "ERROR: Missing build tool: $tool"
+              exit 1
+            fi
+          done
+
+          echo "Original source verification completed."
+
+      - name: Compile original source without patches
         shell: sh
         run: |
           if make -f Makefile.ps2 fceu.elf > build.log 2>&1; then
             echo "Original ELF compiled successfully."
-            tail -n 50 build.log
+            tail -n 60 build.log
           else
-            echo "Original build failed with the current PS2SDK."
-            grep -n -m 30 -E 'fatal error:|error:|undefined reference|multiple definition|cannot find|Error [0-9]+' build.log || true
+            echo "Original source did not compile with this PS2SDK."
+            grep -n -m 40 -E 'fatal error:|error:|undefined reference|multiple definition|cannot find|No such file|Error [0-9]+' build.log || true
             tail -n 100 build.log
             exit 1
           fi
 
-      - name: Pack original ELF if tool is available
+      - name: Verify ELF and unchanged source
+        shell: sh
         run: |
           set -eu
-          if command -v ps2-packer >/dev/null 2>&1; then
-            ps2-packer fceu.elf fceu-packed.elf
-            echo "Packed ELF created."
-          else
-            echo "ps2-packer is unavailable; the unpacked ELF is still preserved."
-          fi
-
-      - name: Verify source files were not edited
-        run: |
-          git diff --exit-code -- Makefile.ps2 src
           test -s fceu.elf
+          git diff --exit-code -- Makefile.ps2 src
           ls -lh fceu.elf
-          if test -s fceu-packed.elf; then ls -lh fceu-packed.elf; fi
 
-      - name: Upload original build log
+      - name: Upload compilation log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FCEUmm-original-build-log
+          name: original-fceumm-build-log
           path: build.log
           if-no-files-found: warn
 
-      - name: Upload original PS2 ELF
+      - name: Upload original ELF
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: FCEUmm-original-0.3.3-ELF
-          path: |
-            fceu.elf
-            fceu-packed.elf
+          name: original-fceumm-ps2-elf
+          path: fceu.elf
           if-no-files-found: error
-          
