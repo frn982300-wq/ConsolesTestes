@@ -479,8 +479,8 @@ jobs:
           EE_OBJS = pce_only.o bdm.o usb.o iomanx.o filexio.o
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
           EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC)
-          EE_LDFLAGS += -L$(GSKIT)/lib
-          EE_LIBS += $(PCE_RAW_LIB) -lgskit -ldmakit -lpad -lfileXio -lpatches -lz -lm -lstdc++
+          EE_LDFLAGS += -L$(GSKIT)/lib -L$(PS2SDK)/ports/lib
+          EE_LIBS += $(PCE_RAW_LIB) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
           all: $(EE_BIN)
           clean:
           	rm -f $(EE_OBJS) $(EE_BIN)
@@ -500,6 +500,56 @@ jobs:
           bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
           bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
 
+      - name: Locate or build PS2 MIPS static zlib
+        shell: sh
+        run: |
+          set -eu
+          # IMPORTANT: host Alpine zlib is x86_64 and cannot link into a PS2 ELF.
+          # Locate the MIPS-targeted static archive installed by ps2sdk-ports.
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          ZLIB_LIB=""
+          for candidate in \
+            "$PS2SDK/ports/lib/libz.a" \
+            "$PS2SDK/ee/lib/libz.a" \
+            "$PS2_ROOT/ee/ports/lib/libz.a"; do
+            if [ -s "$candidate" ]; then ZLIB_LIB="$candidate"; break; fi
+          done
+          if [ -z "$ZLIB_LIB" ]; then
+            ZLIB_LIB="$(find "$PS2_ROOT" -type f -name libz.a -print -quit 2>/dev/null || true)"
+          fi
+          if [ -n "$ZLIB_LIB" ] && [ -s "$ZLIB_LIB" ]; then
+            echo "Found PS2 zlib: $ZLIB_LIB"
+          else
+            echo 'No preinstalled PS2 libz.a. Building static zlib for MIPS R5900.'
+            git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git pce-zlib-src
+            mkdir -p pce-zlib-ps2/obj
+            : > zlib-build.log
+            for source in \
+              adler32.c compress.c crc32.c deflate.c \
+              gzclose.c gzlib.c gzread.c gzwrite.c \
+              infback.c inffast.c inflate.c inftrees.c \
+              trees.c uncompr.c zutil.c; do
+              target="pce-zlib-ps2/obj/${source%.c}.o"
+              echo "Compiling $source" >> zlib-build.log
+              if ! mips64r5900el-ps2-elf-gcc \
+                -O2 -G0 -fno-pic -I pce-zlib-src \
+                -c "pce-zlib-src/$source" -o "$target" >> zlib-build.log 2>&1; then
+                tail -n 100 zlib-build.log
+                exit 1
+              fi
+            done
+            mips64r5900el-ps2-elf-ar rcs pce-zlib-ps2/libz.a pce-zlib-ps2/obj/*.o
+            mips64r5900el-ps2-elf-ranlib pce-zlib-ps2/libz.a
+            ZLIB_LIB="$(pwd)/pce-zlib-ps2/libz.a"
+          fi
+          test -s "$ZLIB_LIB"
+          mips64r5900el-ps2-elf-nm -g --defined-only "$ZLIB_LIB" | grep -Eq '[[:space:]](inflate|deflate|zlibVersion)$' || {
+            echo 'Invalid zlib archive: expected compression functions are absent.'
+            exit 1
+          }
+          printf '%s\n' "$ZLIB_LIB" > pce-zlib-path.txt
+          ls -lh "$ZLIB_LIB"
+
       - name: Compile independent PCE-only PS2 ELF
         shell: sh
         run: |
@@ -510,8 +560,11 @@ jobs:
             echo 'Missing Libretro public header'; exit 1;
           }
           LIBRETRO_INC="$(pwd)/$(dirname "$HEADER")"
+          ZLIB_LIB="$(cat pce-zlib-path.txt)"
+          test -s "$ZLIB_LIB" || { echo 'Missing PS2 zlib static library'; exit 1; }
           echo "Libretro include: $LIBRETRO_INC"
-          if make -C pce-only -j2 PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" > frontend-build.log 2>&1; then
+          echo "MIPS zlib library: $ZLIB_LIB"
+          if make -C pce-only -j2 PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" PCE_ZLIB_LIB="$ZLIB_LIB" > frontend-build.log 2>&1; then
             echo 'Standalone single-core ELF compiled.'
           else
             tail -n 180 frontend-build.log
@@ -544,6 +597,8 @@ jobs:
             aurora-revision.txt
             core-build.log
             frontend-build.log
+            zlib-build.log
+            pce-zlib-path.txt
             pce-symbols.txt
           if-no-files-found: warn
 
