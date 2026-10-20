@@ -1,4 +1,4 @@
-name: Beetle PCE Fast PS2 Only - Aurora exFAT + Vorbis Fix
+name: PCE Fast PS2 Diagnostic Build
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build single-core Beetle PCE Fast ELF
+    name: Build PCE Fast PS2 diagnostic ELF
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -134,6 +134,11 @@ jobs:
           static unsigned frame_w = 256, frame_h = 224;
           static int core_initialized, core_loaded;
           static int usb_initialized;
+          static int pad_state_debug = -1;
+          static int pad_init_result = -999, pad_open_result = -999;
+          static int pad_rpc_sio = -999, pad_rpc_pad = -999;
+          static int debug_code;
+          static char debug_stage_text[40] = "WAITING FOR X";
           
           static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:._()";
           static const unsigned long long glyphs[] = {
@@ -168,8 +173,26 @@ jobs:
             label(45,99,2,subtitle,aqua);
           }
           static void refresh_screen(void) { gsKit_queue_exec(gs); gsKit_sync_flip(gs); }
+          static void diag_show(const char *stage, int code) {
+            uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
+            uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
+            char tmp[48];
+            strncpy(debug_stage_text,stage,sizeof(debug_stage_text)-1);
+            debug_stage_text[sizeof(debug_stage_text)-1]=0;
+            debug_code=code;
+            title_screen("DIAGNOSTIC STATUS");
+            label(45,150,2,debug_stage_text,aqua);
+            snprintf(tmp,sizeof(tmp),"CODE %d",debug_code);
+            label(45,200,2,tmp,white);
+            snprintf(tmp,sizeof(tmp),"PAD STATE %d",pad_state_debug);
+            label(45,245,2,tmp,white);
+            snprintf(tmp,sizeof(tmp),"PAD INIT %d",pad_init_result);
+            label(45,290,2,tmp,white);
+            refresh_screen();
+          }
           static void pad_scan(void) {
             int s=padGetState(0,0);
+            pad_state_debug=s;
             buttons_prev=buttons_now;
             if((s!=PAD_STATE_STABLE && s!=PAD_STATE_FINDCTP1) ||
                !padRead(0,0,&pad_info)) {buttons_now=0;buttons_edge=0;return;}
@@ -182,16 +205,32 @@ jobs:
           }
           static int usb_init(void) {
             int r;
-            if(usb_initialized)return 0;
+            if(usb_initialized) { diag_show("USB ALREADY READY",0); return 0; }
+            diag_show("IOP SERVICES INIT",0);
             SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb();
-            r=load_mod(iomanx_irx,size_iomanx_irx); if(r<0)return r;
-            r=load_mod(filexio_irx,size_filexio_irx); if(r<0)return r;
-            r=fileXioInit(); if(r<0)return r;
-            r=load_mod(usbd_mini_irx,size_usbd_mini_irx); if(r<0)return r;
-            r=load_mod(bdm_irx,size_bdm_irx); if(r<0)return r;
-            r=load_mod(bdmfs_fatfs_irx,size_bdmfs_fatfs_irx); if(r<0)return r;
-            r=load_mod(usbmass_bd_irx,size_usbmass_bd_irx); if(r<0)return r;
+            diag_show("LOAD IOMANX",0);
+            r=load_mod(iomanx_irx,size_iomanx_irx);
+            if(r<0) { diag_show("IOMANX LOAD FAILED",r); return r; }
+            diag_show("LOAD FILEXIO",0);
+            r=load_mod(filexio_irx,size_filexio_irx);
+            if(r<0) { diag_show("FILEXIO LOAD FAILED",r); return r; }
+            diag_show("FILEXIO INIT",0);
+            r=fileXioInit();
+            if(r<0) { diag_show("FILEXIO INIT FAILED",r); return r; }
+            diag_show("LOAD USBD MINI",0);
+            r=load_mod(usbd_mini_irx,size_usbd_mini_irx);
+            if(r<0) { diag_show("USBD LOAD FAILED",r); return r; }
+            diag_show("LOAD BDM",0);
+            r=load_mod(bdm_irx,size_bdm_irx);
+            if(r<0) { diag_show("BDM LOAD FAILED",r); return r; }
+            diag_show("LOAD BDMFS FATFS",0);
+            r=load_mod(bdmfs_fatfs_irx,size_bdmfs_fatfs_irx);
+            if(r<0) { diag_show("FATFS LOAD FAILED",r); return r; }
+            diag_show("LOAD USB MASS",0);
+            r=load_mod(usbmass_bd_irx,size_usbmass_bd_irx);
+            if(r<0) { diag_show("USB MASS LOAD FAILED",r); return r; }
             usb_initialized=1;
+            diag_show("USB STACK READY",0);
             return 0;
           }
           static int is_pce(const char *name) {
@@ -422,27 +461,65 @@ jobs:
             memset(&tex,0,sizeof(tex));
             tex.Width=TEX_SIZE;tex.Height=TEX_SIZE;tex.PSM=GS_PSM_CT32;tex.Mem=(u32 *)pixels;
             tex.Vram=gsKit_vram_alloc(gs,gsKit_texture_size(TEX_SIZE,TEX_SIZE,GS_PSM_CT32),GSKIT_ALLOC_USERBUFFER);
+            diag_show("INIT SIF RPC",0);
             SifInitRpc(0);
-            SifLoadModule("rom0:XSIO2MAN",0,NULL);
-            SifLoadModule("rom0:XPADMAN",0,NULL);
-            if(padInit(0)==1) padPortOpen(0,0,pad_buf);
+            diag_show("LOAD XSIO2MAN",0);
+            pad_rpc_sio=SifLoadModule("rom0:XSIO2MAN",0,NULL);
+            if(pad_rpc_sio<0) diag_show("XSIO2MAN FAILED",pad_rpc_sio);
+            diag_show("LOAD XPADMAN",0);
+            pad_rpc_pad=SifLoadModule("rom0:XPADMAN",0,NULL);
+            if(pad_rpc_pad<0) diag_show("XPADMAN FAILED",pad_rpc_pad);
+            diag_show("PAD INIT",0);
+            pad_init_result=padInit(0);
+            if(pad_init_result==1) {
+              diag_show("PAD PORT OPEN",0);
+              pad_open_result=padPortOpen(0,0,pad_buf);
+              if(pad_open_result<=0) diag_show("PAD OPEN FAILED",pad_open_result);
+            } else {
+              diag_show("PAD INIT FAILED",pad_init_result);
+            }
             screen=0;
+            diag_show("WAITING FOR X",0);
             for(;;) {
               char tmp[80];
               pad_scan();
               if(screen==0) {
-                title_screen("BEETLE CORE - PC ENGINE ONLY");
-                label(52,210,3,"X OPEN USB ROMS",GS_SETREG_RGBAQ(230,240,245,0x80,0));
-                if(status_code<0) {
-                  snprintf(tmp,sizeof(tmp),"ERROR %d",status_code);
-                  label(52,299,2,tmp,GS_SETREG_RGBAQ(230,240,245,0x80,0));
-                }
+                uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
+                uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
+                title_screen("DEBUG USB STARTUP");
+                label(52,190,3,"X OPEN USB ROMS",white);
+                label(45,260,1,debug_stage_text,aqua);
+                snprintf(tmp,sizeof(tmp),"CODE %d",debug_code);
+                label(45,285,1,tmp,white);
+                snprintf(tmp,sizeof(tmp),"PAD STATE %d",pad_state_debug);
+                label(45,310,1,tmp,white);
+                snprintf(tmp,sizeof(tmp),"PAD INIT %d",pad_init_result);
+                label(45,335,1,tmp,white);
+                snprintf(tmp,sizeof(tmp),"PAD OPEN %d",pad_open_result);
+                label(45,360,1,tmp,white);
+                snprintf(tmp,sizeof(tmp),"SIO MOD %d",pad_rpc_sio);
+                label(45,385,1,tmp,white);
+                snprintf(tmp,sizeof(tmp),"PAD MOD %d",pad_rpc_pad);
+                label(45,410,1,tmp,white);
                 if(buttons_edge&PAD_CROSS) {
+                  diag_show("X DETECTED",(int)buttons_edge);
                   status_code=usb_init();
                   if(status_code>=0) {
+                    diag_show("SCAN MASS ROOT",0);
                     strcpy(folder,"mass:/");status_code=scan_dir();
-                    if(status_code<0) {strcpy(folder,"mass0:/");status_code=scan_dir();}
-                    if(status_code>=0)screen=1;
+                    if(status_code<0) {
+                      diag_show("MASS ROOT FAILED",status_code);
+                      diag_show("SCAN MASS0 ROOT",0);
+                      strcpy(folder,"mass0:/");status_code=scan_dir();
+                    }
+                    if(status_code>=0) {
+                      diag_show("BROWSER READY",0);
+                      screen=1;
+                    } else {
+                      diag_show("USB SCAN FAILED",status_code);
+                    }
+                  } else {
+                    diag_show("USB INIT FAILED",status_code);
                   }
                 }
                 refresh_screen();
@@ -480,7 +557,7 @@ jobs:
           }
           PCE_FRONTEND_C
           cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
-          EE_BIN = PCE-Fast-Only-PS2.ELF
+          EE_BIN = PCE-Fast-Only-DEBUG.ELF
           EE_OBJS = pce_only.o usbd_mini.o bdm.o bdmfs_fatfs.o usbmass_bd.o iomanx.o filexio.o $(PCE_OPTIONAL_OBJS)
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
           EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC)
@@ -635,8 +712,8 @@ jobs:
             tail -n 180 frontend-build.log
             exit 1
           fi
-          test -s pce-only/PCE-Fast-Only-PS2.ELF
-          ls -lh pce-only/PCE-Fast-Only-PS2.ELF
+          test -s pce-only/PCE-Fast-Only-DEBUG.ELF
+          ls -lh pce-only/PCE-Fast-Only-DEBUG.ELF
 
       - name: Verify ELF and separate core source
         shell: sh
@@ -645,7 +722,7 @@ jobs:
           python3 - <<'PY_CHECK'
           from pathlib import Path
           import struct
-          p=Path('pce-only/PCE-Fast-Only-PS2.ELF')
+          p=Path('pce-only/PCE-Fast-Only-DEBUG.ELF')
           b=p.read_bytes()[:20]
           assert b[:4] == b'\x7fELF', 'Not an ELF'
           assert b[4:6] == bytes([1,1]), 'Not little-endian ELF32'
@@ -657,7 +734,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-Only-build-logs
+          name: PCE-Fast-Only-Debug-build-logs
           path: |
             aurora-revision.txt
             core-build.log
@@ -674,9 +751,9 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-Only-PS2-Experimental
+          name: PCE-Fast-Only-PS2-Diagnostic
           path: |
-            pce-only/PCE-Fast-Only-PS2.ELF
+            pce-only/PCE-Fast-Only-DEBUG.ELF
             pce-only/pce_only.c
             pce-only/Makefile
             pce-only/vorbis_no_cd.c
