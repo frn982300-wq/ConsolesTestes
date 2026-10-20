@@ -16,6 +16,13 @@ jobs:
     container:
       image: ps2dev/ps2dev:latest
     steps:
+      - name: Initialize artifact staging (always available)
+        shell: sh
+        run: |
+          set -eu
+          mkdir -p artifact-staging
+          printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
+
       - name: Checkout workflow repository
         uses: actions/checkout@v4
 
@@ -431,8 +438,4 @@ jobs:
           static int16_t input_state(unsigned port,unsigned device,unsigned index,unsigned id) {
             (void)index;
             if(port!=0 || device!=RETRO_DEVICE_JOYPAD)return 0;
-            switch(id) {
-              case RETRO_DEVICE_ID_JOYPAD_UP:return !!(buttons_now&PAD_UP);
-              case RETRO_DEVICE_ID_JOYPAD_DOWN:return !!(buttons_now&PAD_DOWN);
-              case RETRO_DEVICE_ID_JOYPAD_LEFT:return !!(buttons_now&PAD_LEFT);
-              case RETRO_DEVICE_ID_JOYPAD_RIGHT:
+            switch(id)
