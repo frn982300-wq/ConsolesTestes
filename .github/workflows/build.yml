@@ -1,4 +1,4 @@
-name: Beetle PCE Fast PS2 Only - Tested V11 exFAT + Vorbis
+name: Beetle PCE Fast PS2 Only - V12 exFAT Audio Input Video Optimized
 
 on:
   push:
@@ -107,6 +107,7 @@ jobs:
           #include <io_common.h>
           #include <iox_stat.h>
           #include <libretro.h>
+          #include <audsrv.h>
           #include <stdio.h>
           #include <stdlib.h>
           #include <string.h>
@@ -118,8 +119,8 @@ jobs:
           #define ROM_LIMIT (8u * 1024u * 1024u)
           #define TEX_SIZE 512
           
-          extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[];
-          extern unsigned int size_usbd_irx, size_usbhdfsd_irx, size_iomanx_irx, size_filexio_irx;
+          extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[], audsrv_irx[];
+          extern unsigned int size_usbd_irx, size_usbhdfsd_irx, size_iomanx_irx, size_filexio_irx, size_audsrv_irx;
           
           typedef struct { char name[256]; int dir; } Entry;
           static Entry entries[MAX_FILES];
@@ -140,7 +141,11 @@ jobs:
           static int video_received, pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
           static unsigned frame_w = 256, frame_h = 224;
           static int core_initialized, core_loaded;
-          static int usb_initialized;
+          static int usb_initialized, iop_prepared;
+          static int pad_ready;
+          static int audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
+          static unsigned audio_rate = 44100;
+          static unsigned char lut5[32], lut6[64];
           
           static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:._()";
           static const unsigned long long glyphs[] = {
@@ -176,7 +181,9 @@ jobs:
           }
           static void refresh_screen(void) { gsKit_queue_exec(gs); gsKit_sync_flip(gs); }
           static void pad_scan(void) {
-            int s=padGetState(0,0);
+            int s;
+            if(!pad_ready) { buttons_now=0; buttons_edge=0; return; }
+            s=padGetState(0,0);
             buttons_prev=buttons_now;
             if((s!=PAD_STATE_STABLE && s!=PAD_STATE_FINDCTP1) ||
                !padRead(0,0,&pad_info)) {buttons_now=0;buttons_edge=0;return;}
@@ -188,7 +195,7 @@ jobs:
             return (id<0)?id:((result<0)?result:0);
           }
           static void usb_progress(const char *stage) {
-            title_screen("V11 EXFAT USB INIT");
+            title_screen("V12 EXFAT AUDIO");
             label(52,210,2,stage,GS_SETREG_RGBAQ(50,210,175,0x80,0));
             refresh_screen();
           }
@@ -196,7 +203,7 @@ jobs:
             int r;
             if(usb_initialized)return 0;
             usb_progress("INIT SIF / IOP");
-            SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb();
+            SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
             usb_progress("LOAD IOMANX");
             r=load_mod(iomanx_irx,size_iomanx_irx); if(r<0)return r;
             usb_progress("LOAD FILEXIO");
@@ -210,6 +217,42 @@ jobs:
             usb_initialized=1;
             usb_progress("EXFAT DRIVERS READY");
             return 0;
+          }
+          static int audio_init(unsigned requested_rate) {
+            int r;
+            struct audsrv_fmt_t fmt;
+            if(audio_ready) return 0;
+            if(!iop_prepared) {
+              SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
+            }
+            if(!audio_module_loaded) {
+              /* LIBSD is the PS2 IOP sound driver required by audsrv. */
+              (void)SifLoadModule("rom0:LIBSD",0,NULL);
+              r=load_mod(audsrv_irx,size_audsrv_irx);
+              if(r<0) { audio_error=r; return r; }
+              audio_module_loaded=1;
+            }
+            if(!audio_rpc_ready) {
+              r=audsrv_init();
+              if(r<0) { audio_error=r; return r; }
+              audio_rpc_ready=1;
+            }
+            fmt.freq=(int)(requested_rate ? requested_rate : 44100);
+            fmt.bits=16; fmt.channels=2;
+            r=audsrv_set_format(&fmt);
+            if(r<0 && fmt.freq!=44100) { fmt.freq=44100; r=audsrv_set_format(&fmt); }
+            if(r<0 && fmt.freq!=22050) { fmt.freq=22050; r=audsrv_set_format(&fmt); }
+            if(r<0) { audio_error=r; return r; }
+            r=audsrv_set_volume(90);
+            if(r<0) { audio_error=r; return r; }
+            audio_rate=(unsigned)fmt.freq;
+            audio_ready=1; audio_error=0;
+            return 0;
+          }
+          static unsigned next_pow2(unsigned v) {
+            unsigned n=1;
+            while(n<v && n<TEX_SIZE)n<<=1;
+            return n;
           }
           static int is_pce(const char *name) {
             const char *dot=strrchr(name,'.');
@@ -335,40 +378,55 @@ jobs:
                 return true;
           #ifdef RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE
               case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE:
-                *(int *)data=1;return true; /* Video only for initial port. */
+                *(int *)data=3;return true; /* Enable both video (1) and audio (2). */
           #endif
               default:return false;
             }
           }
           static void video_cb(const void *data,unsigned width,unsigned height,size_t pitch) {
-            unsigned x,y;
+            unsigned x,y,tw,th;
             if(!data || width==0 || height==0 || width>TEX_SIZE || height>TEX_SIZE)return;
             frame_w=width;frame_h=height;
+            /* Upload only a power-of-two texture sized to this frame. */
+            tw=next_pow2(width); th=next_pow2(height);
+            tex.Width=tw; tex.Height=th;
             for(y=0;y<height;y++) {
               const uint8_t *row=(const uint8_t *)data+y*pitch;
               for(x=0;x<width;x++) {
                 unsigned r,g,b;
                 if(pixel_format==RETRO_PIXEL_FORMAT_XRGB8888) {
                   unsigned p=((const uint32_t *)row)[x];
-                  r=(p>>16)&255u;g=(p>>8)&255u;b=p&255u;
+                  r=(p>>16)&255u; g=(p>>8)&255u; b=p&255u;
                 } else if(pixel_format==RETRO_PIXEL_FORMAT_RGB565) {
                   unsigned p=((const uint16_t *)row)[x];
-                  r=((p>>11)&31u)*255u/31u;
-                  g=((p>>5)&63u)*255u/63u;
-                  b=(p&31u)*255u/31u;
+                  r=lut5[(p>>11)&31u]; g=lut6[(p>>5)&63u]; b=lut5[p&31u];
                 } else {
+                  /* Libretro 0RGB1555: R[14:10], G[9:5], B[4:0]. */
                   unsigned p=((const uint16_t *)row)[x];
-                  r=((p>>10)&31u)*255u/31u;
-                  g=((p>>5)&31u)*255u/31u;
-                  b=(p&31u)*255u/31u;
+                  r=lut5[(p>>10)&31u]; g=lut5[(p>>5)&31u]; b=lut5[p&31u];
                 }
-                pixels[y*TEX_SIZE+x]=0x80000000u|(b<<16)|(g<<8)|r;
+                /* GS CT32 pixel word: R in bits 0-7, G 8-15, B 16-23, A 24-31. */
+                pixels[y*tw+x]=0x80000000u|(b<<16)|(g<<8)|r;
               }
             }
             video_received=1;
           }
-          static void audio_one(int16_t left,int16_t right) {(void)left;(void)right;}
-          static size_t audio_many(const int16_t *samples,size_t frames) {(void)samples;return frames;}
+          static size_t audio_many(const int16_t *samples,size_t frames) {
+            size_t bytes;
+            int r;
+            if(!samples || frames==0 || !audio_ready) return frames;
+            if(frames>(size_t)0x1fffffff) { audio_error=-900; return frames; }
+            bytes=frames*2u*sizeof(int16_t);
+            r=audsrv_wait_audio((int)bytes);
+            if(r<0) { audio_error=r; return frames; }
+            r=audsrv_play_audio((const char *)samples,(int)bytes);
+            if(r<0) audio_error=r;
+            return frames;
+          }
+          static void audio_one(int16_t left,int16_t right) {
+            int16_t pair[2]; pair[0]=left; pair[1]=right;
+            (void)audio_many(pair,1);
+          }
           static void input_poll(void) { /* pad_scan is called by the main loop */ }
           static int16_t input_state(unsigned port,unsigned device,unsigned index,unsigned id) {
             (void)index;
@@ -377,332 +435,4 @@ jobs:
               case RETRO_DEVICE_ID_JOYPAD_UP:return !!(buttons_now&PAD_UP);
               case RETRO_DEVICE_ID_JOYPAD_DOWN:return !!(buttons_now&PAD_DOWN);
               case RETRO_DEVICE_ID_JOYPAD_LEFT:return !!(buttons_now&PAD_LEFT);
-              case RETRO_DEVICE_ID_JOYPAD_RIGHT:return !!(buttons_now&PAD_RIGHT);
-              case RETRO_DEVICE_ID_JOYPAD_B:return !!(buttons_now&PAD_CROSS);
-              case RETRO_DEVICE_ID_JOYPAD_A:return !!(buttons_now&PAD_CIRCLE);
-              case RETRO_DEVICE_ID_JOYPAD_START:return !!(buttons_now&PAD_START);
-              case RETRO_DEVICE_ID_JOYPAD_SELECT:return !!(buttons_now&PAD_SELECT);
-              case RETRO_DEVICE_ID_JOYPAD_X:return !!(buttons_now&PAD_SQUARE);
-              case RETRO_DEVICE_ID_JOYPAD_Y:return !!(buttons_now&PAD_TRIANGLE);
-              default:return 0;
-            }
-          }
-          static int begin_game(const char *path) {
-            struct retro_game_info game;
-            struct retro_system_info info;
-            int r;
-            unload_game();
-            r=read_full_game(path);
-            if(r<0)return r;
-            if(!core_initialized) {
-              retro_set_environment(core_environment);
-              retro_set_video_refresh(video_cb);
-              retro_set_audio_sample(audio_one);
-              retro_set_audio_sample_batch(audio_many);
-              retro_set_input_poll(input_poll);
-              retro_set_input_state(input_state);
-              retro_init();core_initialized=1;
-            }
-            retro_get_system_info(&info);
-            memset(&game,0,sizeof(game));
-            game.path=path;game.data=game_data;game.size=game_size;
-            if(!retro_load_game(&game)) {unload_game();return -104;}
-            core_loaded=1;
-            retro_set_controller_port_device(0,RETRO_DEVICE_JOYPAD);
-            return 0;
-          }
-          static void draw_game(void) {
-            if(video_received) {
-              gsKit_clear(gs,GS_SETREG_RGBAQ(0,0,0,0x80,0));
-              tex.Mem=(void *)pixels;
-              gsKit_texture_upload(gs,&tex);
-              gsKit_prim_sprite_texture(gs,&tex,
-                0.0f,0.0f,0.0f,0.0f,640.0f,448.0f,
-                (float)frame_w,(float)frame_h,1,
-                GS_SETREG_RGBAQ(0x80,0x80,0x80,0x80,0));
-            } else {
-              title_screen("WAITING FOR VIDEO");
-            }
-          }
-          int main(int argc,char **argv) {
-            (void)argc;(void)argv;
-            gs=gsKit_init_global();
-            if(!gs)return 1;
-            gs->PSM=GS_PSM_CT16;
-            gs->PSMZ=GS_PSMZ_16;
-            gs->ZBuffering=GS_SETTING_OFF;
-            dmaKit_init(D_CTRL_RELE_OFF,D_CTRL_MFD_OFF,D_CTRL_STS_UNSPEC,
-                        D_CTRL_STD_OFF,D_CTRL_RCYC_8,1<<DMA_CHANNEL_GIF);
-            dmaKit_chan_init(DMA_CHANNEL_GIF);
-            gsKit_init_screen(gs);
-            gsKit_mode_switch(gs,GS_ONESHOT);
-            memset(&tex,0,sizeof(tex));
-            tex.Width=TEX_SIZE;tex.Height=TEX_SIZE;tex.PSM=GS_PSM_CT32;tex.Mem=(u32 *)pixels;
-            tex.Vram=gsKit_vram_alloc(gs,gsKit_texture_size(TEX_SIZE,TEX_SIZE,GS_PSM_CT32),GSKIT_ALLOC_USERBUFFER);
-            SifInitRpc(0);
-            SifLoadModule("rom0:XSIO2MAN",0,NULL);
-            SifLoadModule("rom0:XPADMAN",0,NULL);
-            if(padInit(0)==1) padPortOpen(0,0,pad_buf);
-            screen=0;
-            for(;;) {
-              char tmp[80];
-              pad_scan();
-              if(screen==0) {
-                title_screen("BEETLE CORE - PC ENGINE ONLY");
-                label(52,210,3,"X OPEN USB ROMS",GS_SETREG_RGBAQ(230,240,245,0x80,0));
-                if(status_code<0) {
-                  snprintf(tmp,sizeof(tmp),"ERROR %d",status_code);
-                  label(52,299,2,tmp,GS_SETREG_RGBAQ(230,240,245,0x80,0));
-                }
-                if(buttons_edge&PAD_CROSS) {
-                  status_code=usb_init();
-                  if(status_code>=0) {
-                    usb_progress("SCAN MASS ROOT");
-                    strcpy(folder,"mass:/");status_code=scan_dir();
-                    if(status_code<0) {
-                      usb_progress("SCAN MASS0 ROOT");
-                      strcpy(folder,"mass0:/");status_code=scan_dir();
-                    }
-                    if(status_code>=0)screen=1;
-                  }
-                }
-                refresh_screen();
-              } else if(screen==1) {
-                if(nentries>0) {
-                  if(buttons_edge&PAD_UP)selected=(selected+nentries-1)%nentries;
-                  if(buttons_edge&PAD_DOWN)selected=(selected+1)%nentries;
-                }
-                if(buttons_edge&PAD_CIRCLE)enter_parent();
-                if((buttons_edge&PAD_CROSS) && nentries>0) {
-                  char next[MAX_PATH];
-                  int written=snprintf(next,sizeof(next),"%s%s%s",folder,
-                    entries[selected].name,entries[selected].dir?"/":"");
-                  if(written<0 || written>=(int)sizeof(next)) status_code=-105;
-                  else if(entries[selected].dir) {
-                    strcpy(folder,next);status_code=scan_dir();
-                  } else {
-                    strcpy(game_path,next);
-                    status_code=begin_game(game_path);
-                    if(status_code>=0)screen=2;
-                  }
-                }
-                render_browser();refresh_screen();
-              } else {
-                if((buttons_now&(PAD_L1|PAD_R1|PAD_START))==(PAD_L1|PAD_R1|PAD_START)) {
-                  unload_game();screen=1;
-                  buttons_prev=buttons_now;
-                  continue;
-                }
-                retro_run();
-                draw_game();refresh_screen();
-              }
-            }
-            return 0;
-          }
-          PCE_FRONTEND_C
-          cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
-          EE_BIN = PCE-Fast-Only-PS2.ELF
-          EE_OBJS = pce_only.o usbd.o usbhdfsd.o iomanx.o filexio.o $(PCE_OPTIONAL_OBJS)
-          EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
-          EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC)
-          EE_LDFLAGS += -L$(GSKIT)/lib -L$(PS2SDK)/ports/lib
-          EE_LIBS += $(PCE_RAW_LIB) $(PCE_VORBIS_LIBS) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
-          all: $(EE_BIN)
-          clean:
-          	rm -f $(EE_OBJS) $(EE_BIN)
-          include $(PS2SDK)/samples/Makefile.pref
-          include $(PS2SDK)/samples/Makefile.eeglobal
-          PCE_FRONTEND_MAKE
-          test -s pce-only/pce_only.c
-          test -s pce-only/Makefile
-
-      - name: Embed USB IRX drivers
-        shell: sh
-        run: |
-          set -eu
-          cd pce-only
-          bin2c usbd.irx usbd.c usbd_irx
-          bin2c usbhdfsd.irx usbhdfsd.c usbhdfsd_irx
-          bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
-          bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
-
-      - name: Locate or build PS2 MIPS static zlib
-        shell: sh
-        run: |
-          set -eu
-          # IMPORTANT: host Alpine zlib is x86_64 and cannot link into a PS2 ELF.
-          # Locate the MIPS-targeted static archive installed by ps2sdk-ports.
-          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
-          ZLIB_LIB=""
-          for candidate in \
-            "$PS2SDK/ports/lib/libz.a" \
-            "$PS2SDK/ee/lib/libz.a" \
-            "$PS2_ROOT/ee/ports/lib/libz.a"; do
-            if [ -s "$candidate" ]; then ZLIB_LIB="$candidate"; break; fi
-          done
-          if [ -z "$ZLIB_LIB" ]; then
-            ZLIB_LIB="$(find "$PS2_ROOT" -type f -name libz.a -print -quit 2>/dev/null || true)"
-          fi
-          if [ -n "$ZLIB_LIB" ] && [ -s "$ZLIB_LIB" ]; then
-            echo "Found PS2 zlib: $ZLIB_LIB"
-          else
-            echo 'No preinstalled PS2 libz.a. Building static zlib for MIPS R5900.'
-            git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git pce-zlib-src
-            mkdir -p pce-zlib-ps2/obj
-            : > zlib-build.log
-            for source in \
-              adler32.c compress.c crc32.c deflate.c \
-              gzclose.c gzlib.c gzread.c gzwrite.c \
-              infback.c inffast.c inflate.c inftrees.c \
-              trees.c uncompr.c zutil.c; do
-              target="pce-zlib-ps2/obj/${source%.c}.o"
-              echo "Compiling $source" >> zlib-build.log
-              if ! mips64r5900el-ps2-elf-gcc \
-                -O2 -G0 -fno-pic -I pce-zlib-src \
-                -c "pce-zlib-src/$source" -o "$target" >> zlib-build.log 2>&1; then
-                tail -n 100 zlib-build.log
-                exit 1
-              fi
-            done
-            mips64r5900el-ps2-elf-ar rcs pce-zlib-ps2/libz.a pce-zlib-ps2/obj/*.o
-            mips64r5900el-ps2-elf-ranlib pce-zlib-ps2/libz.a
-            ZLIB_LIB="$(pwd)/pce-zlib-ps2/libz.a"
-          fi
-          test -s "$ZLIB_LIB"
-          mips64r5900el-ps2-elf-nm -g --defined-only "$ZLIB_LIB" | grep -Eq '[[:space:]](inflate|deflate|zlibVersion)$' || {
-            echo 'Invalid zlib archive: expected compression functions are absent.'
-            exit 1
-          }
-          printf '%s\n' "$ZLIB_LIB" > pce-zlib-path.txt
-          ls -lh "$ZLIB_LIB"
-
-      - name: Find native PS2 Vorbis libraries or disable CD-track decoding
-        shell: sh
-        run: |
-          set -eu
-          # Cartridge .pce games do not use audioreader Ogg file APIs.
-          # These missing references come from CD track decoding only.
-          ROOT="${PS2DEV:-/usr/local/ps2dev}"
-          VF="$(find "$ROOT" -type f -name libvorbisfile.a -print -quit 2>/dev/null || true)"
-          V="$(find "$ROOT" -type f -name libvorbis.a -print -quit 2>/dev/null || true)"
-          O="$(find "$ROOT" -type f -name libogg.a -print -quit 2>/dev/null || true)"
-          if [ -n "$VF" ] && [ -s "$VF" ] && \
-             [ -n "$V" ] && [ -s "$V" ] && \
-             [ -n "$O" ] && [ -s "$O" ] && \
-             mips64r5900el-ps2-elf-nm -g --defined-only "$VF" | grep -Eq '[[:space:]]ov_open_callbacks$'; then
-            echo 'Native PS2 Ogg/Vorbis libraries found; CD audio decoding enabled.'
-            printf '%s %s %s\n' "$VF" "$V" "$O" > pce-vorbis-libs.txt
-            : > pce-vorbis-extra-objects.txt
-            echo 'vorbisfile/native' > pce-vorbis-mode.txt
-          else
-            # A nonfunctional fake decoder is never advertised as CD support.
-            # Explicit fail-closed stubs resolve the 5 linker references and
-            # preserve real cartridge emulation, without faking decoded data.
-            cat > pce-only/vorbis_no_cd.c <<'PCE_NO_CD_VORBIS_C'
-          /* Cartridge-only experimental build: Ogg CD audio deliberately disabled.
-             These entrypoints are referenced by Mednafen's CD audioreader but
-             must never be used for .pce cartridge games. Always report failure. */
-          #include <stddef.h>
-          int ov_open_callbacks(void *src, void *vf, const char *initial,
-                                long ibytes, void *callbacks) {
-            (void)src; (void)vf; (void)initial; (void)ibytes; (void)callbacks;
-            return -1;
-          }
-          int ov_clear(void *vf) { (void)vf; return 0; }
-          long long ov_pcm_total(void *vf, int stream) {
-            (void)vf; (void)stream; return -1;
-          }
-          long ov_read(void *vf, char *buf, int len, int endian,
-                       int word, int sign, int *bitstream) {
-            (void)vf; (void)buf; (void)len; (void)endian;
-            (void)word; (void)sign; (void)bitstream; return -1;
-          }
-          int ov_pcm_seek(void *vf, long long samples) {
-            (void)vf; (void)samples; return -1;
-          }
-          PCE_NO_CD_VORBIS_C
-            : > pce-vorbis-libs.txt
-            echo 'vorbis_no_cd.o' > pce-vorbis-extra-objects.txt
-            echo 'vorbisfile/stubbed - PCE cartridge only, no CD Ogg' > pce-vorbis-mode.txt
-            echo 'No PS2 Vorbis libraries: CD Ogg disabled; .pce cartridges unaffected.'
-          fi
-          cat pce-vorbis-mode.txt
-
-      - name: Compile independent PCE-only PS2 ELF
-        shell: sh
-        run: |
-          set -eu
-          RAW="$(pwd)/aurora/build/beetle-pce-fast-src/mednafen_pce_fast_libretro_ps2_raw.a"
-          HEADER="$(find aurora/src/third_party/beetle-pce-fast -name libretro.h -type f | head -n 1)"
-          test -n "$HEADER" && test -s "$HEADER" || {
-            echo 'Missing Libretro public header'; exit 1;
-          }
-          LIBRETRO_INC="$(pwd)/$(dirname "$HEADER")"
-          ZLIB_LIB="$(cat pce-zlib-path.txt)"
-          VORBIS_LIBS="$(cat pce-vorbis-libs.txt)"
-          OPTIONAL_OBJS="$(cat pce-vorbis-extra-objects.txt)"
-          test -s "$ZLIB_LIB" || { echo 'Missing PS2 zlib static library'; exit 1; }
-          echo "Libretro include: $LIBRETRO_INC"
-          echo "MIPS zlib library: $ZLIB_LIB"
-          echo "Vorbis mode: $(cat pce-vorbis-mode.txt)"
-          if make -C pce-only -j2 \
-            PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" \
-            PCE_ZLIB_LIB="$ZLIB_LIB" PCE_VORBIS_LIBS="$VORBIS_LIBS" \
-            PCE_OPTIONAL_OBJS="$OPTIONAL_OBJS" > frontend-build.log 2>&1; then
-            echo 'Standalone single-core ELF compiled.'
-          else
-            tail -n 180 frontend-build.log
-            exit 1
-          fi
-          test -s pce-only/PCE-Fast-Only-PS2.ELF
-          ls -lh pce-only/PCE-Fast-Only-PS2.ELF
-
-      - name: Verify ELF and separate core source
-        shell: sh
-        run: |
-          set -eu
-          python3 - <<'PY_CHECK'
-          from pathlib import Path
-          import struct
-          p=Path('pce-only/PCE-Fast-Only-PS2.ELF')
-          b=p.read_bytes()[:20]
-          assert b[:4] == b'\x7fELF', 'Not an ELF'
-          assert b[4:6] == bytes([1,1]), 'Not little-endian ELF32'
-          assert struct.unpack_from('<H',b,18)[0] == 8, 'Not MIPS'
-          print('ELF header validated; gameplay still requires a PS2 test.')
-          PY_CHECK
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: PCE-Fast-Only-build-logs
-          path: |
-            aurora-revision.txt
-            core-build.log
-            frontend-build.log
-            zlib-build.log
-            pce-zlib-path.txt
-            pce-symbols.txt
-            pce-only/usbd.irx
-            pce-only/usbhdfsd.irx
-            pce-vorbis-mode.txt
-            pce-vorbis-libs.txt
-            pce-vorbis-extra-objects.txt
-          if-no-files-found: warn
-
-      - name: Upload PCE-only ELF and source for GPL compliance
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: PCE-Fast-Only-PS2-V11-exFAT
-          path: |
-            pce-only/PCE-Fast-Only-PS2.ELF
-            pce-only/pce_only.c
-            pce-only/usbd.irx
-            pce-only/usbhdfsd.irx
-            pce-only/Makefile
-            pce-only/vorbis_no_cd.c
-            aurora/LICENSE
-            aurora/LICENSES/Beetle-PCE-Fast-GPL-2.0.txt
-          if-no-files-found: error
+              case RE
