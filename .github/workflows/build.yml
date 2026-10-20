@@ -1,4 +1,4 @@
-name: Beetle PCE Fast PS2 Only - V12 exFAT Audio Input Video Optimized
+name: PCE Fast PS2 V12 - Build and Upload Artifacts
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build single-core Beetle PCE Fast ELF with V11 exFAT
+    name: Build PCE Fast V12 ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -435,4 +435,4 @@ jobs:
               case RETRO_DEVICE_ID_JOYPAD_UP:return !!(buttons_now&PAD_UP);
               case RETRO_DEVICE_ID_JOYPAD_DOWN:return !!(buttons_now&PAD_DOWN);
               case RETRO_DEVICE_ID_JOYPAD_LEFT:return !!(buttons_now&PAD_LEFT);
-              case RE
+              case RETRO_DEVICE_ID_JOYPAD_RIGHT:
