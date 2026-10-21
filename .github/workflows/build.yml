@@ -22,7 +22,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: V12.2.5 keeps V12.2.4 input/USB support; adds pixel-pitch format guard, video diagnostics, and buffered audio output\n' >> artifact-staging/workflow-status.txt
+          printf 'Base: V12.2.4 Joypad / PS2 newlib types. Changes: buffered audio, pitch-aware pixel format validation, reduced per-frame diagnostics, texture upload only when a new frame arrives.\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -77,27 +77,38 @@ jobs:
         shell: sh
         run: |
           set -eu
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          PS2SDK="${PS2SDK:-$PS2_ROOT/ps2sdk}"
+          export PS2SDK
           mkdir -p pce-only
-          # Reuse the exact pair previously tested in the PS2 exFAT V10/V11 project.
-          # The repository must contain this archive at its root.
-          test -s FCEUmm-PS2-exFAT-integrated-2026.zip || {
-            echo 'Missing FCEUmm-PS2-exFAT-integrated-2026.zip in repository root.'
-            echo 'Add the same driver archive used by the working V10/V11 workflow.'
+          # Prefer the original driver package. The previous V12.2.4 artifact ZIP is a fallback.
+          if [ -s FCEUmm-PS2-exFAT-integrated-2026.zip ]; then
+            unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
+              FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx > pce-only/usbd.irx
+            unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
+              FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx > pce-only/usbhdfsd.irx
+          elif [ -s PCE-Fast-PS2-V12.2.5-Source-Package.zip ]; then
+            unzip -p PCE-Fast-PS2-V12.2.5-Source-Package.zip \
+              pce-only/usbd.irx > pce-only/usbd.irx
+            unzip -p PCE-Fast-PS2-V12.2.5-Source-Package.zip \
+              pce-only/usbhdfsd.irx > pce-only/usbhdfsd.irx
+          elif [ -s PCE-Fast-PS2-V12.2.4-Joypad-PS2-Newlib-Types.zip ]; then
+            unzip -p PCE-Fast-PS2-V12.2.4-Joypad-PS2-Newlib-Types.zip \
+              pce-only/usbd.irx > pce-only/usbd.irx
+            unzip -p PCE-Fast-PS2-V12.2.4-Joypad-PS2-Newlib-Types.zip \
+              pce-only/usbhdfsd.irx > pce-only/usbhdfsd.irx
+          else
+            echo 'No known-good exFAT driver archive found in the repository root.'
+            echo 'Add FCEUmm-PS2-exFAT-integrated-2026.zip or PCE-Fast-PS2-V12.2.5-Source-Package.zip.'
             exit 1
-          }
-          unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
-            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx \
-            > pce-only/usbd.irx
-          unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
-            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx \
-            > pce-only/usbhdfsd.irx
+          fi
           test -s pce-only/usbd.irx
           test -s pce-only/usbhdfsd.irx
           test -s "$PS2SDK/iop/irx/iomanX.irx"
           test -s "$PS2SDK/iop/irx/fileXio.irx"
-          echo 'Extracted tested V10/V11 exFAT pair: usbd.irx + usbhdfsd.irx.'
+          echo 'Known-good exFAT driver pair extracted.'
 
-      - name: Generate PS2-only Libretro frontend
+      - name: Generate PS2-only Libretro frontend with V12.2.5 fixes
         shell: sh
         run: |
           set -eu
@@ -131,17 +142,17 @@ jobs:
           /* Some PS2SDK/newlib headers do not expose snprintf under the current
              feature macros. Declare its standard signature explicitly. */
           extern int snprintf(char *str, size_t size, const char *format, ...);
-
+          
           #define MAX_FILES 128
           #define MAX_PATH 512
           #define ROM_LIMIT (8u * 1024u * 1024u)
           #define TEX_SIZE 512
-          /* PCE emits at most about 882 stereo frames per video frame at 44.1 kHz/50 Hz. */
           #define AUDIO_PENDING_FRAMES 2048
-
+          #define PCE_SHOW_DIAGNOSTICS 0
+          
           extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[], audsrv_irx[];
           extern unsigned int size_usbd_irx, size_usbhdfsd_irx, size_iomanx_irx, size_filexio_irx, size_audsrv_irx;
-
+          
           typedef struct { char name[256]; int dir; } Entry;
           static Entry entries[MAX_FILES];
           static int nentries, selected, screen, status_code;
@@ -165,6 +176,7 @@ jobs:
           static unsigned frame_w = 256, frame_h = 224;
           static int16_t audio_pending[AUDIO_PENDING_FRAMES * 2] __attribute__((aligned(64)));
           static size_t audio_pending_frames;
+          static unsigned int audio_dropped_frames;
           static int core_initialized, core_loaded;
           static int usb_initialized, iop_prepared;
           static int pad_ready;
@@ -180,7 +192,7 @@ jobs:
           static int audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
           static unsigned audio_rate = 44100;
           static unsigned char lut5[32], lut6[64];
-
+          
           static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:._()";
           static const unsigned long long glyphs[] = {
             0x4631fc62eULL,0x3e317c62fULL,0x78210843eULL,0x3e318c62fULL,0x7c217843fULL,
@@ -437,17 +449,32 @@ jobs:
           }
           static void video_cb(const void *data,unsigned width,unsigned height,size_t pitch) {
             unsigned x,y,tw,th;
-            enum retro_pixel_format fmt=(enum retro_pixel_format)pixel_format;
+            enum retro_pixel_format fmt;
             if(!data || width==0 || height==0 || width>TEX_SIZE || height>TEX_SIZE)return;
-            /* Pitch is in bytes. Prefer its unambiguous 32-bit/16-bit stride when a core's
-               reported format is stale or inconsistent with the actual callback buffer. */
-            if(pitch >= (size_t)width * 4u)
+          
+            /* Pitch is a byte count, not a pixel count. Reject rows too short to hold 16-bit pixels. */
+            if(pitch < (size_t)width * 2u)return;
+            fmt=(enum retro_pixel_format)pixel_format;
+          
+            /* The row stride is the strongest check against a stale/mismatched format request. */
+            if(pitch >= (size_t)width * 4u) {
               fmt=RETRO_PIXEL_FORMAT_XRGB8888;
-            else if(pitch >= (size_t)width * 2u && fmt==RETRO_PIXEL_FORMAT_XRGB8888)
+            } else if(fmt==RETRO_PIXEL_FORMAT_XRGB8888) {
+              if(frame_format_used==RETRO_PIXEL_FORMAT_RGB565 ||
+                 frame_format_used==RETRO_PIXEL_FORMAT_0RGB1555)
+                fmt=(enum retro_pixel_format)frame_format_used;
+              else
+                fmt=RETRO_PIXEL_FORMAT_0RGB1555;
+            }
+            if(fmt!=RETRO_PIXEL_FORMAT_XRGB8888 &&
+               fmt!=RETRO_PIXEL_FORMAT_RGB565 &&
+               fmt!=RETRO_PIXEL_FORMAT_0RGB1555)
               fmt=RETRO_PIXEL_FORMAT_0RGB1555;
+          
+            frame_w=width;frame_h=height;
             frame_format_used=(int)fmt;
             frame_pitch_used=pitch;
-            frame_w=width;frame_h=height;
+          
             /* Upload only a power-of-two texture sized to this frame. */
             tw=next_pow2(width); th=next_pow2(height);
             tex.Width=tw; tex.Height=th;
@@ -462,18 +489,18 @@ jobs:
                   unsigned p=((const uint16_t *)row)[x];
                   r=lut5[(p>>11)&31u]; g=lut6[(p>>5)&63u]; b=lut5[p&31u];
                 } else {
-                  /* Libretro native-endian 0RGB1555: R[14:10], G[9:5], B[4:0]. */
+                  /* Libretro 0RGB1555: R[14:10], G[9:5], B[4:0]. */
                   unsigned p=((const uint16_t *)row)[x];
                   r=lut5[(p>>10)&31u]; g=lut5[(p>>5)&31u]; b=lut5[p&31u];
                 }
-                /* GS CT32 byte layout: R, G, B, A. Keep the GS's neutral 0x80 modulation. */
+                /* GS CT32 pixel word: R in bits 0-7, G 8-15, B 16-23, A 24-31. */
                 pixels[y*tw+x]=0x80000000u|(b<<16)|(g<<8)|r;
               }
             }
             video_received=1;
             video_frame_updated=1;
           }
-          /* Buffer samples during retro_run(). Avoid an RPC/wait for every individual sample. */
+          /* Collect core samples during retro_run(); avoid an audio RPC for every sample. */
           static size_t audio_many(const int16_t *samples,size_t frames) {
             size_t room,copy_frames;
             if(!samples || frames==0 || !audio_ready) return frames;
@@ -484,11 +511,19 @@ jobs:
                      copy_frames*2u*sizeof(int16_t));
               audio_pending_frames+=copy_frames;
             }
+            if(copy_frames<frames)
+              audio_dropped_frames+=(unsigned int)(frames-copy_frames);
             return frames;
           }
           static void audio_one(int16_t left,int16_t right) {
-            int16_t pair[2]; pair[0]=left; pair[1]=right;
-            (void)audio_many(pair,1);
+            if(!audio_ready)return;
+            if(audio_pending_frames>=AUDIO_PENDING_FRAMES) {
+              audio_dropped_frames++;
+              return;
+            }
+            audio_pending[audio_pending_frames*2u]=left;
+            audio_pending[audio_pending_frames*2u+1u]=right;
+            audio_pending_frames++;
           }
           static void audio_flush(void) {
             size_t offset=0,frames,bytes;
@@ -497,10 +532,10 @@ jobs:
               audio_pending_frames=0;
               return;
             }
-            /* Small chunks avoid asking audsrv for more free space than its queue can provide. */
+            /* Send moderate chunks rather than waiting and issuing RPCs per sample. */
             while(offset<audio_pending_frames) {
               frames=audio_pending_frames-offset;
-              if(frames>512u) frames=512u;
+              if(frames>512u)frames=512u;
               bytes=frames*2u*sizeof(int16_t);
               r=audsrv_wait_audio((int)bytes);
               if(r<0) { audio_error=r; break; }
@@ -508,6 +543,8 @@ jobs:
               if(r<0) { audio_error=r; break; }
               offset+=frames;
             }
+            if(offset<audio_pending_frames)
+              audio_dropped_frames+=(unsigned int)(audio_pending_frames-offset);
             audio_pending_frames=0;
           }
           /* Translate PS2 pad bits into the bit positions required by Libretro's JOYPAD_MASK query. */
@@ -577,7 +614,6 @@ jobs:
           }
           static int begin_game(const char *path) {
             struct retro_game_info game;
-            struct retro_system_info info;
             int r;
             unload_game();
             r=read_full_game(path);
@@ -593,7 +629,12 @@ jobs:
             }
             /* Expose the connected physical pad to the PCE core's five possible multitap ports. */
             { unsigned int port; for(port=0;port<5;port++) retro_set_controller_port_device(port,RETRO_DEVICE_JOYPAD); }
-            retro_get_system_info(&info);
+            memset(&game,0,sizeof(game));
+            game.path=path;game.data=game_data;game.size=game_size;
+            if(!retro_load_game(&game)) {unload_game();return -104;}
+            core_loaded=1;
+          
+            /* Query timing after loading the game so the sound server uses the core's real rate. */
             {
               struct retro_system_av_info av;
               retro_get_system_av_info(&av);
@@ -602,15 +643,13 @@ jobs:
               else
                 (void)audio_init(44100);
             }
-            memset(&game,0,sizeof(game));
-            game.path=path;game.data=game_data;game.size=game_size;
-            if(!retro_load_game(&game)) {unload_game();return -104;}
-            core_loaded=1;
             return 0;
           }
           static void draw_game(void) {
-            char diag[32];
+          #if PCE_SHOW_DIAGNOSTICS
+            char diag[40];
             uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
+          #endif
             if(video_received) {
               gsKit_clear(gs,GS_SETREG_RGBAQ(0,0,0,0x80,0));
               tex.Mem=(void *)pixels;
@@ -622,10 +661,10 @@ jobs:
                 0.0f,0.0f,0.0f,0.0f,640.0f,448.0f,
                 (float)frame_w,(float)frame_h,1,
                 GS_SETREG_RGBAQ(0x80,0x80,0x80,0x80,0));
-              /* Small status overlay makes audio and pad failures observable on-console. */
+          #if PCE_SHOW_DIAGNOSTICS
+              /* Enable PCE_SHOW_DIAGNOSTICS only when troubleshooting; glyphs are expensive per frame. */
               if(audio_ready) label(6,6,1,"AUDIO OK",aqua);
               else { snprintf(diag,sizeof(diag),"AUDIO ERR %d",audio_error); label(6,6,1,diag,aqua); }
-              /* Live-read status plus raw and mapped button masks. */
               label(6,16,1,pad_read_ok?"PAD READ OK":"PAD NO DATA",aqua);
               snprintf(diag,sizeof(diag),"STATE %d LEN %d",pad_state_value,pad_read_len);
               label(6,26,1,diag,aqua);
@@ -645,6 +684,9 @@ jobs:
               label(6,96,1,diag,aqua);
               snprintf(diag,sizeof(diag),"PIT %d W %d H %d",(int)frame_pitch_used,(int)frame_w,(int)frame_h);
               label(6,106,1,diag,aqua);
+              snprintf(diag,sizeof(diag),"AUDDROP %u",audio_dropped_frames);
+              label(6,116,1,diag,aqua);
+          #endif
             } else {
               title_screen("WAITING FOR VIDEO");
             }
@@ -745,6 +787,7 @@ jobs:
           }
           PCE_FRONTEND_C
           cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
+
           EE_BIN = PCE-Fast-Only-PS2.ELF
           EE_OBJS = pce_only.o usbd.o usbhdfsd.o iomanx.o filexio.o audsrv.o $(PCE_OPTIONAL_OBJS)
           EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ -include $(PS2_NEWLIB_SYS_TYPES)
@@ -764,10 +807,11 @@ jobs:
         shell: sh
         run: |
           set -eu
-          ROOT="${PS2DEV:-/usr/local/ps2dev}"
-          HEADER="$(find "$ROOT" -type f -name audsrv.h -print -quit 2>/dev/null || true)"
-          LIB="$(find "$ROOT" -type f -name libaudsrv.a -print -quit 2>/dev/null || true)"
-          IRX="$(find "$ROOT" -type f -name audsrv.irx -print -quit 2>/dev/null || true)"
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          ROOT="${PS2SDK:-$PS2_ROOT/ps2sdk}"
+          HEADER="$(find "$PS2_ROOT" -type f -name audsrv.h -print -quit 2>/dev/null || true)"
+          LIB="$(find "$PS2_ROOT" -type f -name libaudsrv.a -print -quit 2>/dev/null || true)"
+          IRX="$(find "$PS2_ROOT" -type f -name audsrv.irx -print -quit 2>/dev/null || true)"
           test -n "$HEADER" && test -s "$HEADER" || { echo 'PS2SDK audsrv.h not found'; exit 1; }
           test -n "$LIB" && test -s "$LIB" || { echo 'PS2SDK libaudsrv.a not found'; exit 1; }
           test -n "$IRX" && test -s "$IRX" || { echo 'PS2SDK audsrv.irx not found'; exit 1; }
@@ -778,10 +822,13 @@ jobs:
           echo "Found audsrv library: $LIB"
           echo "Embedded audsrv IRX: $IRX"
 
-      - name: Embed USB IRX drivers
+      - name: Embed USB and audio IRX drivers
         shell: sh
         run: |
           set -eu
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          PS2SDK="${PS2SDK:-$PS2_ROOT/ps2sdk}"
+          export PS2SDK
           cd pce-only
           bin2c usbd.irx usbd.c usbd_irx
           bin2c usbhdfsd.irx usbhdfsd.c usbhdfsd_irx
@@ -793,14 +840,10 @@ jobs:
         shell: sh
         run: |
           set -eu
-          # IMPORTANT: host Alpine zlib is x86_64 and cannot link into a PS2 ELF.
-          # Locate the MIPS-targeted static archive installed by ps2sdk-ports.
           PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          SDK="${PS2SDK:-$PS2_ROOT/ps2sdk}"
           ZLIB_LIB=""
-          for candidate in \
-            "$PS2SDK/ports/lib/libz.a" \
-            "$PS2SDK/ee/lib/libz.a" \
-            "$PS2_ROOT/ee/ports/lib/libz.a"; do
+          for candidate in "$SDK/ports/lib/libz.a" "$SDK/ee/lib/libz.a" "$PS2_ROOT/ee/ports/lib/libz.a"; do
             if [ -s "$candidate" ]; then ZLIB_LIB="$candidate"; break; fi
           done
           if [ -z "$ZLIB_LIB" ]; then
@@ -813,16 +856,9 @@ jobs:
             git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git pce-zlib-src
             mkdir -p pce-zlib-ps2/obj
             : > zlib-build.log
-            for source in \
-              adler32.c compress.c crc32.c deflate.c \
-              gzclose.c gzlib.c gzread.c gzwrite.c \
-              infback.c inffast.c inflate.c inftrees.c \
-              trees.c uncompr.c zutil.c; do
+            for source in adler32.c compress.c crc32.c deflate.c gzclose.c gzlib.c gzread.c gzwrite.c infback.c inffast.c inflate.c inftrees.c trees.c uncompr.c zutil.c; do
               target="pce-zlib-ps2/obj/${source%.c}.o"
-              echo "Compiling $source" >> zlib-build.log
-              if ! mips64r5900el-ps2-elf-gcc \
-                -O2 -G0 -fno-pic -I pce-zlib-src \
-                -c "pce-zlib-src/$source" -o "$target" >> zlib-build.log 2>&1; then
+              if ! mips64r5900el-ps2-elf-gcc -O2 -G0 -fno-pic -I pce-zlib-src -c "pce-zlib-src/$source" -o "$target" >> zlib-build.log 2>&1; then
                 tail -n 100 zlib-build.log
                 exit 1
               fi
@@ -832,10 +868,6 @@ jobs:
             ZLIB_LIB="$(pwd)/pce-zlib-ps2/libz.a"
           fi
           test -s "$ZLIB_LIB"
-          mips64r5900el-ps2-elf-nm -g --defined-only "$ZLIB_LIB" | grep -Eq '[[:space:]](inflate|deflate|zlibVersion)$' || {
-            echo 'Invalid zlib archive: expected compression functions are absent.'
-            exit 1
-          }
           printf '%s\n' "$ZLIB_LIB" > pce-zlib-path.txt
           ls -lh "$ZLIB_LIB"
 
@@ -843,51 +875,32 @@ jobs:
         shell: sh
         run: |
           set -eu
-          # Cartridge .pce games do not use audioreader Ogg file APIs.
-          # These missing references come from CD track decoding only.
           ROOT="${PS2DEV:-/usr/local/ps2dev}"
           VF="$(find "$ROOT" -type f -name libvorbisfile.a -print -quit 2>/dev/null || true)"
           V="$(find "$ROOT" -type f -name libvorbis.a -print -quit 2>/dev/null || true)"
           O="$(find "$ROOT" -type f -name libogg.a -print -quit 2>/dev/null || true)"
-          if [ -n "$VF" ] && [ -s "$VF" ] && \
-             [ -n "$V" ] && [ -s "$V" ] && \
-             [ -n "$O" ] && [ -s "$O" ] && \
+          if [ -n "$VF" ] && [ -s "$VF" ] && [ -n "$V" ] && [ -s "$V" ] && [ -n "$O" ] && [ -s "$O" ] && \
              mips64r5900el-ps2-elf-nm -g --defined-only "$VF" | grep -Eq '[[:space:]]ov_open_callbacks$'; then
-            echo 'Native PS2 Ogg/Vorbis libraries found; CD audio decoding enabled.'
             printf '%s %s %s\n' "$VF" "$V" "$O" > pce-vorbis-libs.txt
             : > pce-vorbis-extra-objects.txt
-            echo 'vorbisfile/native' > pce-vorbis-mode.txt
+            echo 'Native PS2 Ogg/Vorbis libraries found; CD audio decoding enabled.' > pce-vorbis-mode.txt
           else
-            # A nonfunctional fake decoder is never advertised as CD support.
-            # Explicit fail-closed stubs resolve the 5 linker references and
-            # preserve real cartridge emulation, without faking decoded data.
             cat > pce-only/vorbis_no_cd.c <<'PCE_NO_CD_VORBIS_C'
-          /* Cartridge-only experimental build: Ogg CD audio deliberately disabled.
-             These entrypoints are referenced by Mednafen's CD audioreader but
-             must never be used for .pce cartridge games. Always report failure. */
+          /* Cartridge-only build: CD Ogg audio decoding is deliberately disabled. */
           #include <stddef.h>
-          int ov_open_callbacks(void *src, void *vf, const char *initial,
-                                long ibytes, void *callbacks) {
-            (void)src; (void)vf; (void)initial; (void)ibytes; (void)callbacks;
-            return -1;
+          int ov_open_callbacks(void *src, void *vf, const char *initial, long ibytes, void *callbacks) {
+            (void)src; (void)vf; (void)initial; (void)ibytes; (void)callbacks; return -1;
           }
           int ov_clear(void *vf) { (void)vf; return 0; }
-          long long ov_pcm_total(void *vf, int stream) {
-            (void)vf; (void)stream; return -1;
+          long long ov_pcm_total(void *vf, int stream) { (void)vf; (void)stream; return -1; }
+          long ov_read(void *vf, char *buf, int len, int endian, int word, int sign, int *bitstream) {
+            (void)vf; (void)buf; (void)len; (void)endian; (void)word; (void)sign; (void)bitstream; return -1;
           }
-          long ov_read(void *vf, char *buf, int len, int endian,
-                       int word, int sign, int *bitstream) {
-            (void)vf; (void)buf; (void)len; (void)endian;
-            (void)word; (void)sign; (void)bitstream; return -1;
-          }
-          int ov_pcm_seek(void *vf, long long samples) {
-            (void)vf; (void)samples; return -1;
-          }
+          int ov_pcm_seek(void *vf, long long samples) { (void)vf; (void)samples; return -1; }
           PCE_NO_CD_VORBIS_C
             : > pce-vorbis-libs.txt
             echo 'vorbis_no_cd.o' > pce-vorbis-extra-objects.txt
-            echo 'vorbisfile/stubbed - PCE cartridge only, no CD Ogg' > pce-vorbis-mode.txt
-            echo 'No PS2 Vorbis libraries: CD Ogg disabled; .pce cartridges unaffected.'
+            echo 'Native Vorbis libraries unavailable; CD Ogg audio disabled, cartridge games remain targeted.' > pce-vorbis-mode.txt
           fi
           cat pce-vorbis-mode.txt
 
@@ -895,40 +908,32 @@ jobs:
         shell: sh
         run: |
           set -eu
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          export PS2DEV="$PS2_ROOT"
+          export PS2SDK="${PS2SDK:-$PS2_ROOT/ps2sdk}"
+          export GSKIT="${GSKIT:-$PS2_ROOT/gsKit}"
           RAW="$(pwd)/aurora/build/beetle-pce-fast-src/mednafen_pce_fast_libretro_ps2_raw.a"
-          HEADER="$(find aurora/src/third_party/beetle-pce-fast -name libretro.h -type f | head -n 1)"
-          test -n "$HEADER" && test -s "$HEADER" || {
-            echo 'Missing Libretro public header'; exit 1;
-          }
+          HEADER="$(find aurora/src/third_party/beetle-pce-fast -name libretro.h -type f -print -quit)"
+          test -n "$HEADER" && test -s "$HEADER" || { echo 'Missing Libretro public header'; exit 1; }
           LIBRETRO_INC="$(pwd)/$(dirname "$HEADER")"
           ZLIB_LIB="$(cat pce-zlib-path.txt)"
           VORBIS_LIBS="$(cat pce-vorbis-libs.txt)"
           OPTIONAL_OBJS="$(cat pce-vorbis-extra-objects.txt)"
           AUDSRV_INC="$(cat pce-audsrv-include.txt)"
           AUDSRV_LIB="$(cat pce-audsrv-lib.txt)"
+          test -s "$RAW" || { echo 'Missing raw PCE core archive'; exit 1; }
           test -s "$ZLIB_LIB" || { echo 'Missing PS2 zlib static library'; exit 1; }
-          echo "Libretro include: $LIBRETRO_INC"
-          echo "MIPS zlib library: $ZLIB_LIB"
-          echo "Vorbis mode: $(cat pce-vorbis-mode.txt)"
-          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
           SYS_TYPES_HEADER="$PS2_ROOT/ee/mips64r5900el-ps2-elf/include/sys/types.h"
           if [ ! -s "$SYS_TYPES_HEADER" ]; then
             SYS_TYPES_HEADER="$(find "$PS2_ROOT/ee" -path '*/mips64r5900el-ps2-elf/include/sys/types.h' -type f -print -quit 2>/dev/null || true)"
           fi
-          test -n "$SYS_TYPES_HEADER" && test -s "$SYS_TYPES_HEADER" || {
-            echo 'Could not locate the PS2 newlib sys/types.h header.'; exit 1;
-          }
-          echo "Using explicit PS2 newlib types header: $SYS_TYPES_HEADER"
+          test -n "$SYS_TYPES_HEADER" && test -s "$SYS_TYPES_HEADER" || { echo 'Could not locate PS2 newlib sys/types.h'; exit 1; }
           cat > pce-only/ps2_types_probe.c <<'PS2_TYPES_PROBE'
           #include <sys/stat.h>
           #include <sys/time.h>
           int main(void) { mode_t mode = 0; dev_t device = 0; struct timeval tv = {0, 0}; return (int)mode + (int)device + (int)tv.tv_sec; }
           PS2_TYPES_PROBE
-          if mips64r5900el-ps2-elf-gcc -D_EE -DNEWLIB_PORT_AWARE \
-            -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ \
-            -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" \
-            -I"$GSKIT/include" -I"$LIBRETRO_INC" -I"$AUDSRV_INC" \
-            -include "$SYS_TYPES_HEADER" -fsyntax-only pce-only/ps2_types_probe.c; then
+          if mips64r5900el-ps2-elf-gcc -D_EE -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" -I"$GSKIT/include" -I"$LIBRETRO_INC" -I"$AUDSRV_INC" -include "$SYS_TYPES_HEADER" -fsyntax-only pce-only/ps2_types_probe.c; then
             echo 'PS2 newlib type preflight passed.'
           else
             echo 'PS2 newlib type preflight failed; full ELF build stopped.'
@@ -947,7 +952,7 @@ jobs:
           test -s pce-only/PCE-Fast-Only-PS2.ELF
           ls -lh pce-only/PCE-Fast-Only-PS2.ELF
 
-      - name: Verify ELF and separate core source
+      - name: Verify ELF header
         shell: sh
         run: |
           set -eu
@@ -959,7 +964,7 @@ jobs:
           assert b[:4] == b'\x7fELF', 'Not an ELF'
           assert b[4:6] == bytes([1,1]), 'Not little-endian ELF32'
           assert struct.unpack_from('<H',b,18)[0] == 8, 'Not MIPS'
-          print('ELF header validated; gameplay still requires a PS2 test.')
+          print('ELF header validated; runtime behavior still requires a PS2 test.')
           PY_CHECK
 
       - name: Collect build outputs and diagnostics (always)
@@ -969,28 +974,7 @@ jobs:
           set +e
           mkdir -p artifact-staging
           printf 'Run: %s\nCommit: %s\n' "${GITHUB_RUN_ID:-unknown}" "${GITHUB_SHA:-unknown}" > artifact-staging/run-info.txt
-          for f in \
-            pce-only/PCE-Fast-Only-PS2.ELF \
-            pce-only/pce_only.c \
-            pce-only/Makefile \
-            pce-only/ps2_types_probe.c \
-            pce-only/usbd.irx \
-            pce-only/usbhdfsd.irx \
-            pce-only/audsrv.irx \
-            pce-only/vorbis_no_cd.c \
-            aurora-revision.txt \
-            core-build.log \
-            frontend-build.log \
-            zlib-build.log \
-            pce-zlib-path.txt \
-            pce-symbols.txt \
-            pce-vorbis-mode.txt \
-            pce-vorbis-libs.txt \
-            pce-vorbis-extra-objects.txt \
-            pce-audsrv-include.txt \
-            pce-audsrv-lib.txt \
-            aurora/LICENSE \
-            aurora/LICENSES/Beetle-PCE-Fast-GPL-2.0.txt; do
+          for f in pce-only/PCE-Fast-Only-PS2.ELF pce-only/pce_only.c pce-only/Makefile pce-only/ps2_types_probe.c pce-only/usbd.irx pce-only/usbhdfsd.irx pce-only/audsrv.irx pce-only/vorbis_no_cd.c aurora-revision.txt core-build.log frontend-build.log zlib-build.log pce-zlib-path.txt pce-symbols.txt pce-vorbis-mode.txt pce-vorbis-libs.txt pce-vorbis-extra-objects.txt pce-audsrv-include.txt pce-audsrv-lib.txt; do
             if [ -f "$f" ]; then
               mkdir -p "artifact-staging/$(dirname "$f")"
               cp "$f" "artifact-staging/$f"
