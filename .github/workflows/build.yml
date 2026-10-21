@@ -1,4 +1,4 @@
-name: PCE Fast PS2 V12.1 - Live Pad Input Diagnostic (snprintf fix)
+name: PCE Fast PS2 V12.2 - Controller Callback Fix
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.1 ELF and publish artifacts
+    name: Build PCE Fast V12.2 ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -22,7 +22,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: V12.1 live controller-read diagnostic\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: V12.2 controller callback and live input diagnostic\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -158,7 +158,9 @@ jobs:
           static int pad_read_ok, pad_state_value = -1, pad_read_len;
           static unsigned int pad_raw_buttons = 0xffffu;
           static int pad_init_result, pad_open_result;
-          static unsigned int input_active_mask;
+          static unsigned int input_active_mask, input_query_mask;
+          static unsigned int input_poll_count, input_state_count;
+          static int input_last_port = -1, input_last_device = -1;
           static int input_last_id = -1, input_last_value;
           static int audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
           static unsigned audio_rate = 44100;
@@ -460,13 +462,19 @@ jobs:
             int16_t pair[2]; pair[0]=left; pair[1]=right;
             (void)audio_many(pair,1);
           }
-          static void input_poll(void) { input_active_mask=0; }
+          /* The mask is reset immediately before retro_run(), not here: some cores may poll more than once per frame. */
+          static void input_poll(void) { input_poll_count++; }
           static int16_t input_state(unsigned port,unsigned device,unsigned index,unsigned id) {
             int16_t result=0;
             (void)index;
-            if(port!=0 || device!=RETRO_DEVICE_JOYPAD) {
-              input_last_id=-1; input_last_value=0; return 0;
-            }
+            input_state_count++;
+            input_last_port=(int)port;
+            input_last_device=(int)device;
+            input_last_id=(int)id;
+            input_last_value=0;
+            if(port!=0 || (device & RETRO_DEVICE_MASK)!=RETRO_DEVICE_JOYPAD)
+              return 0;
+            if(id<32) input_query_mask |= (1u<<id);
             switch(id) {
               case RETRO_DEVICE_ID_JOYPAD_UP: result=!!(buttons_now&PAD_UP); break;
               case RETRO_DEVICE_ID_JOYPAD_DOWN: result=!!(buttons_now&PAD_DOWN); break;
@@ -486,7 +494,7 @@ jobs:
               case RETRO_DEVICE_ID_JOYPAD_R3: result=!!(buttons_now&PAD_R3); break;
               default: result=0; break;
             }
-            input_last_id=(int)id; input_last_value=result;
+            input_last_value=result;
             if(result && id<16) input_active_mask |= (1u<<id);
             return result;
           }
@@ -506,6 +514,8 @@ jobs:
               retro_set_input_state(input_state);
               retro_init();core_initialized=1;
             }
+            /* Explicitly select the standard joypad device on port 0. */
+            retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
             retro_get_system_info(&info);
             {
               struct retro_system_av_info av;
@@ -519,7 +529,6 @@ jobs:
             game.path=path;game.data=game_data;game.size=game_size;
             if(!retro_load_game(&game)) {unload_game();return -104;}
             core_loaded=1;
-            retro_set_controller_port_device(0,RETRO_DEVICE_JOYPAD);
             return 0;
           }
           static void draw_game(void) {
@@ -544,10 +553,14 @@ jobs:
               label(6,36,1,diag,aqua);
               snprintf(diag,sizeof(diag),"KEY %04X",buttons_now & 0xffffu);
               label(6,46,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"ACT %04X",input_active_mask & 0xffffu);
+              snprintf(diag,sizeof(diag),"QRY %04X",input_query_mask & 0xffffu);
               label(6,56,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"IN ID %d VAL %d",input_last_id,input_last_value);
+              snprintf(diag,sizeof(diag),"ACT %04X",input_active_mask & 0xffffu);
               label(6,66,1,diag,aqua);
+              snprintf(diag,sizeof(diag),"P%d D%d I%d V%d",input_last_port,input_last_device,input_last_id,input_last_value);
+              label(6,76,1,diag,aqua);
+              snprintf(diag,sizeof(diag),"POLL %u CALL %u",input_poll_count,input_state_count);
+              label(6,86,1,diag,aqua);
             } else {
               title_screen("WAITING FOR VIDEO");
             }
@@ -628,6 +641,15 @@ jobs:
                   buttons_prev=buttons_now;
                   continue;
                 }
+                /* Per-frame diagnostics are reset here, before the core polls input. */
+                input_active_mask=0;
+                input_query_mask=0;
+                input_poll_count=0;
+                input_state_count=0;
+                input_last_port=-1;
+                input_last_device=-1;
+                input_last_id=-1;
+                input_last_value=0;
                 retro_run();
                 draw_game();refresh_screen();
               }
@@ -873,7 +895,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.1-Live-Pad-Diagnostics
+          name: PCE-Fast-PS2-V12.2-Controller-Callback-Diagnostics
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
