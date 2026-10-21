@@ -1,4 +1,4 @@
-name: PCE Fast PS2 V12.2 - Controller Callback Fix
+name: PCE Fast PS2 V12.2.1 - POSIX Types Fix
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.2 ELF and publish artifacts
+    name: Build PCE Fast V12.2.1 ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -22,7 +22,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: V12.2 controller callback and live input diagnostic\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: V12.2.1 POSIX type visibility fix plus controller callback diagnostic\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -662,7 +662,7 @@ jobs:
           cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
           EE_BIN = PCE-Fast-Only-PS2.ELF
           EE_OBJS = pce_only.o usbd.o usbhdfsd.o iomanx.o filexio.o audsrv.o $(PCE_OPTIONAL_OBJS)
-          EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE
+          EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -include sys/types.h
           EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC) -I$(PCE_AUDSRV_INC)
           EE_LDFLAGS += -L$(GSKIT)/lib -L$(PS2SDK)/ports/lib
           EE_LIBS += $(PCE_RAW_LIB) $(PCE_AUDSRV_LIB) $(PCE_VORBIS_LIBS) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
@@ -897,7 +897,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2-Controller-Callback-Diagnostics
+          name: PCE-Fast-PS2-V12.2.1-POSIX-Types-Diagnostics
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
