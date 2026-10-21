@@ -1,4 +1,4 @@
-name: PCE Fast PS2 V12.2.3 - Joypad and PS2SDK Types Fix
+name: PCE Fast PS2 V12.2.4 - Joypad and PS2SDK Types Fix
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.2.3 ELF and publish artifacts
+    name: Build PCE Fast V12.2.4 ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -22,7 +22,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: V12.2.3 joypad-mask support, ports 0-4, and explicit PS2 newlib types header\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: V12.2.4 joypad-mask support, ports 0-4, explicit PS2 newlib types, and timeval guard compatibility\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -692,7 +692,7 @@ jobs:
           cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
           EE_BIN = PCE-Fast-Only-PS2.ELF
           EE_OBJS = pce_only.o usbd.o usbhdfsd.o iomanx.o filexio.o audsrv.o $(PCE_OPTIONAL_OBJS)
-          EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -include $(PS2_NEWLIB_SYS_TYPES)
+          EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ -include $(PS2_NEWLIB_SYS_TYPES)
           EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC) -I$(PCE_AUDSRV_INC)
           EE_LDFLAGS += -L$(GSKIT)/lib -L$(PS2SDK)/ports/lib
           EE_LIBS += $(PCE_RAW_LIB) $(PCE_AUDSRV_LIB) $(PCE_VORBIS_LIBS) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
@@ -866,10 +866,11 @@ jobs:
           echo "Using explicit PS2 newlib types header: $SYS_TYPES_HEADER"
           cat > pce-only/ps2_types_probe.c <<'PS2_TYPES_PROBE'
           #include <sys/stat.h>
-          int main(void) { mode_t mode = 0; dev_t device = 0; return (int)mode + (int)device; }
+          #include <sys/time.h>
+          int main(void) { mode_t mode = 0; dev_t device = 0; struct timeval tv = {0, 0}; return (int)mode + (int)device + (int)tv.tv_sec; }
           PS2_TYPES_PROBE
           if mips64r5900el-ps2-elf-gcc -D_EE -DNEWLIB_PORT_AWARE \
-            -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+            -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ \
             -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" \
             -I"$GSKIT/include" -I"$LIBRETRO_INC" -I"$AUDSRV_INC" \
             -include "$SYS_TYPES_HEADER" -fsyntax-only pce-only/ps2_types_probe.c; then
@@ -951,7 +952,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2.3-Joypad-PS2-Newlib-Types
+          name: PCE-Fast-PS2-V12.2.4-Joypad-PS2-Newlib-Types
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
