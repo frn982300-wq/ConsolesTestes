@@ -1,4 +1,4 @@
-name: PCE Fast PS2 V12.2.1 - POSIX Types Fix
+name: PCE Fast PS2 V12.2.2 - Joypad Mask and Port Fix
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.2.1 ELF and publish artifacts
+    name: Build PCE Fast V12.2.2 ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -22,7 +22,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: V12.2.1 POSIX type visibility fix plus controller callback diagnostic\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: V12.2.2 Libretro joypad-mask support and PCE multitap ports 0-4\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -161,6 +161,7 @@ jobs:
           static unsigned int pad_raw_buttons = 0xffffu;
           static int pad_init_result, pad_open_result;
           static unsigned int input_active_mask, input_query_mask;
+          static unsigned int input_mask_query_count;
           static unsigned int input_poll_count, input_state_count;
           static int input_last_port = -1, input_last_device = -1;
           static int input_last_id = -1, input_last_value;
@@ -464,6 +465,27 @@ jobs:
             int16_t pair[2]; pair[0]=left; pair[1]=right;
             (void)audio_many(pair,1);
           }
+          /* Translate PS2 pad bits into the bit positions required by Libretro's JOYPAD_MASK query. */
+          static uint16_t retro_joypad_mask(void) {
+            unsigned int mask=0;
+            if(buttons_now&PAD_CROSS)    mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_B);
+            if(buttons_now&PAD_CIRCLE)   mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_A);
+            if(buttons_now&PAD_SQUARE)   mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_X);
+            if(buttons_now&PAD_TRIANGLE) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_Y);
+            if(buttons_now&PAD_SELECT)   mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_SELECT);
+            if(buttons_now&PAD_START)    mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_START);
+            if(buttons_now&PAD_UP)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_UP);
+            if(buttons_now&PAD_DOWN)     mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_DOWN);
+            if(buttons_now&PAD_LEFT)     mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_LEFT);
+            if(buttons_now&PAD_RIGHT)    mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_RIGHT);
+            if(buttons_now&PAD_L1)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L);
+            if(buttons_now&PAD_R1)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R);
+            if(buttons_now&PAD_L2)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L2);
+            if(buttons_now&PAD_R2)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R2);
+            if(buttons_now&PAD_L3)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L3);
+            if(buttons_now&PAD_R3)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R3);
+            return (uint16_t)mask;
+          }
           /* The mask is reset immediately before retro_run(), not here: some cores may poll more than once per frame. */
           static void input_poll(void) { input_poll_count++; }
           static int16_t input_state(unsigned port,unsigned device,unsigned index,unsigned id) {
@@ -474,9 +496,17 @@ jobs:
             input_last_device=(int)device;
             input_last_id=(int)id;
             input_last_value=0;
-            if(port!=0 || (device & RETRO_DEVICE_MASK)!=RETRO_DEVICE_JOYPAD)
+            /* Beetle PCE Fast may query the multitap's fifth port; this frontend exposes the one physical pad on ports 0-4. */
+            if(port>4 || (device & RETRO_DEVICE_MASK)!=RETRO_DEVICE_JOYPAD)
               return 0;
-            if(id<32) input_query_mask |= (1u<<id);
+            if(id==RETRO_DEVICE_ID_JOYPAD_MASK) {
+              input_mask_query_count++;
+              result=(int16_t)retro_joypad_mask();
+              input_last_value=(int)(uint16_t)result;
+              input_active_mask |= (unsigned int)(uint16_t)result;
+              return result;
+            }
+            if(id<16) input_query_mask |= (1u<<id);
             switch(id) {
               case RETRO_DEVICE_ID_JOYPAD_UP: result=!!(buttons_now&PAD_UP); break;
               case RETRO_DEVICE_ID_JOYPAD_DOWN: result=!!(buttons_now&PAD_DOWN); break;
@@ -516,8 +546,8 @@ jobs:
               retro_set_input_state(input_state);
               retro_init();core_initialized=1;
             }
-            /* Explicitly select the standard joypad device on port 0. */
-            retro_set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
+            /* Expose the connected physical pad to the PCE core's five possible multitap ports. */
+            { unsigned int port; for(port=0;port<5;port++) retro_set_controller_port_device(port,RETRO_DEVICE_JOYPAD); }
             retro_get_system_info(&info);
             {
               struct retro_system_av_info av;
@@ -555,7 +585,7 @@ jobs:
               label(6,36,1,diag,aqua);
               snprintf(diag,sizeof(diag),"KEY %04X",buttons_now & 0xffffu);
               label(6,46,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"QRY %04X",input_query_mask & 0xffffu);
+              snprintf(diag,sizeof(diag),"QRY %04X M%u",input_query_mask & 0xffffu,input_mask_query_count);
               label(6,56,1,diag,aqua);
               snprintf(diag,sizeof(diag),"ACT %04X",input_active_mask & 0xffffu);
               label(6,66,1,diag,aqua);
@@ -646,6 +676,7 @@ jobs:
                 /* Per-frame diagnostics are reset here, before the core polls input. */
                 input_active_mask=0;
                 input_query_mask=0;
+                input_mask_query_count=0;
                 input_poll_count=0;
                 input_state_count=0;
                 input_last_port=-1;
