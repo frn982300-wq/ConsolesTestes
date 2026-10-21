@@ -104,6 +104,8 @@ jobs:
            * No ROM or firmware bundled. Uses the previously tested V10/V11 exFAT driver pair.
            * Native PS2 libvorbisfile optional; fallback supports cartridges only.
            */
+          /* Define POSIX types (including dev_t) before PS2SDK headers that include sys/stat.h. */
+          #include <sys/types.h>
           #include <gsKit.h>
           #include <dmaKit.h>
           #include <libpad.h>
