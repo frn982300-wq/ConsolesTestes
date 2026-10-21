@@ -52,7 +52,7 @@ jobs:
           TARGET_REL="build/pce/beetle_pce_fast_libretro_ps2.a"
           TARGET="$BASE/$TARGET_REL"
           echo "Building PCE library: $TARGET"
-          if make -C aurora -j2 "$TARGET_REL" > core-build.log 2>&1; then
+          if make -C aurora -j2 "$TARGET" > core-build.log 2>&1; then
             echo 'Original Aurora PCE core build command completed.'
           else
             echo 'Failed to build the isolated Aurora PCE core.'
