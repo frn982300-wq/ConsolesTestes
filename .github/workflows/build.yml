@@ -1,4 +1,4 @@
-name: PCE Fast PS2 V12.2.2 - Joypad Mask and Port Fix
+name: PCE Fast PS2 V12.2.3 - Joypad and PS2SDK Types Fix
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.2.2 ELF and publish artifacts
+    name: Build PCE Fast V12.2.3 ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -22,7 +22,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: V12.2.2 Libretro joypad-mask support and PCE multitap ports 0-4\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: V12.2.3 joypad-mask support, ports 0-4, and explicit PS2 newlib types header\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -104,8 +104,7 @@ jobs:
            * No ROM or firmware bundled. Uses the previously tested V10/V11 exFAT driver pair.
            * Native PS2 libvorbisfile optional; fallback supports cartridges only.
            */
-          /* Define POSIX types (including dev_t) before PS2SDK headers that include sys/stat.h. */
-          #include <sys/types.h>
+          /* POSIX types are supplied through the explicit PS2 toolchain newlib header in EE_CFLAGS. */
           #include <gsKit.h>
           #include <dmaKit.h>
           #include <libpad.h>
@@ -693,7 +692,7 @@ jobs:
           cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
           EE_BIN = PCE-Fast-Only-PS2.ELF
           EE_OBJS = pce_only.o usbd.o usbhdfsd.o iomanx.o filexio.o audsrv.o $(PCE_OPTIONAL_OBJS)
-          EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -include sys/types.h
+          EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -include $(PS2_NEWLIB_SYS_TYPES)
           EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC) -I$(PCE_AUDSRV_INC)
           EE_LDFLAGS += -L$(GSKIT)/lib -L$(PS2SDK)/ports/lib
           EE_LIBS += $(PCE_RAW_LIB) $(PCE_AUDSRV_LIB) $(PCE_VORBIS_LIBS) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
@@ -856,11 +855,34 @@ jobs:
           echo "Libretro include: $LIBRETRO_INC"
           echo "MIPS zlib library: $ZLIB_LIB"
           echo "Vorbis mode: $(cat pce-vorbis-mode.txt)"
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          SYS_TYPES_HEADER="$PS2_ROOT/ee/mips64r5900el-ps2-elf/include/sys/types.h"
+          if [ ! -s "$SYS_TYPES_HEADER" ]; then
+            SYS_TYPES_HEADER="$(find "$PS2_ROOT/ee" -path '*/mips64r5900el-ps2-elf/include/sys/types.h' -type f -print -quit 2>/dev/null || true)"
+          fi
+          test -n "$SYS_TYPES_HEADER" && test -s "$SYS_TYPES_HEADER" || {
+            echo 'Could not locate the PS2 newlib sys/types.h header.'; exit 1;
+          }
+          echo "Using explicit PS2 newlib types header: $SYS_TYPES_HEADER"
+          cat > pce-only/ps2_types_probe.c <<'PS2_TYPES_PROBE'
+          #include <sys/stat.h>
+          int main(void) { mode_t mode = 0; dev_t device = 0; return (int)mode + (int)device; }
+          PS2_TYPES_PROBE
+          if mips64r5900el-ps2-elf-gcc -D_EE -DNEWLIB_PORT_AWARE \
+            -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+            -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" \
+            -I"$GSKIT/include" -I"$LIBRETRO_INC" -I"$AUDSRV_INC" \
+            -include "$SYS_TYPES_HEADER" -fsyntax-only pce-only/ps2_types_probe.c; then
+            echo 'PS2 newlib type preflight passed.'
+          else
+            echo 'PS2 newlib type preflight failed; full ELF build stopped.'
+            exit 1
+          fi
           if make -C pce-only -j2 \
             PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" \
             PCE_ZLIB_LIB="$ZLIB_LIB" PCE_VORBIS_LIBS="$VORBIS_LIBS" \
             PCE_AUDSRV_INC="$AUDSRV_INC" PCE_AUDSRV_LIB="$AUDSRV_LIB" \
-            PCE_OPTIONAL_OBJS="$OPTIONAL_OBJS" > frontend-build.log 2>&1; then
+            PCE_OPTIONAL_OBJS="$OPTIONAL_OBJS" PS2_NEWLIB_SYS_TYPES="$SYS_TYPES_HEADER" > frontend-build.log 2>&1; then
             echo 'Standalone single-core ELF compiled.'
           else
             tail -n 180 frontend-build.log
@@ -895,6 +917,7 @@ jobs:
             pce-only/PCE-Fast-Only-PS2.ELF \
             pce-only/pce_only.c \
             pce-only/Makefile \
+            pce-only/ps2_types_probe.c \
             pce-only/usbd.irx \
             pce-only/usbhdfsd.irx \
             pce-only/audsrv.irx \
@@ -928,7 +951,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2.1-POSIX-Types-Diagnostics
+          name: PCE-Fast-PS2-V12.2.3-Joypad-PS2-Newlib-Types
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
