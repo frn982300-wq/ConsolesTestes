@@ -1,5 +1,4 @@
-
-name: PCE Fast PS2 V12.2.4 - Turbo I II Test (Square Triangle)
+name: PCE Fast PS2 V12.2.4 - Turbo I II Debug (Square Triangle)
 
 on:
   push:
@@ -11,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.2.4 Speed Fix + Turbo I II ELF and publish artifacts
+    name: Build PCE Fast V12.2.4 Speed Fix + Turbo I II Debug ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -23,7 +22,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: preserve confirmed speed fix and corrected colors; direct GS-native CT16 upload; Turbo I=PS2 Square, Turbo II=PS2 Triangle; normal I=Circle, II=Cross; preserve USB/exFAT integration\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: diagnostic build; preserve prior speed/color code; show physical Square/Triangle, Turbo states, Libretro A/B values and callback counts; preserve USB/exFAT integration\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -82,7 +81,7 @@ jobs:
             exit 1
           }
           echo 'Verified: native Beetle PCE Fast retro_run function.'
-          echo 'Next frontend test: Square=Turbo I, Triangle=Turbo II; speed/color/exFAT base preserved.'
+          echo 'Diagnostic frontend test: watch SQR/TRI, T1/T2, A/B values, PHASE and callback counters on the PS2.'
 
       - name: Extract the tested V10/V11 exFAT driver pair
         shell: sh
@@ -147,8 +146,8 @@ jobs:
           #define MAX_PATH 512
           #define ROM_LIMIT (8u * 1024u * 1024u)
           #define TEX_SIZE 512
-          /* Diagnostics are disabled during gameplay; per-glyph GS primitives cost frame time. */
-          #define PCE_SHOW_DIAGNOSTICS 0
+          /* Diagnostic overlay intentionally enabled for this test; disable after troubleshooting. */
+          #define PCE_SHOW_DIAGNOSTICS 1
 
           extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[], audsrv_irx[];
           extern unsigned int size_usbd_irx, size_usbhdfsd_irx, size_iomanx_irx, size_filexio_irx, size_audsrv_irx;
@@ -190,6 +189,8 @@ jobs:
           static unsigned int input_poll_count, input_state_count;
           static int input_last_port = -1, input_last_device = -1;
           static int input_last_id = -1, input_last_value;
+          static unsigned int input_a_queries, input_b_queries;
+          static int input_a_value, input_b_value;
           #endif
           static int audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
           static unsigned audio_rate = 44100;
@@ -569,6 +570,10 @@ jobs:
               input_mask_query_count++;
               input_last_value=(int)(uint16_t)result;
               input_active_mask |= (unsigned int)(uint16_t)result;
+              input_a_value = !!((uint16_t)result & (1u << RETRO_DEVICE_ID_JOYPAD_A));
+              input_b_value = !!((uint16_t)result & (1u << RETRO_DEVICE_ID_JOYPAD_B));
+              input_a_queries++;
+              input_b_queries++;
           #endif
               return result;
             }
@@ -597,6 +602,8 @@ jobs:
           #if PCE_SHOW_DIAGNOSTICS
             input_last_value=result;
             if(result && id<16) input_active_mask |= (1u<<id);
+            if(id==RETRO_DEVICE_ID_JOYPAD_A) { input_a_value=result; input_a_queries++; }
+            if(id==RETRO_DEVICE_ID_JOYPAD_B) { input_b_value=result; input_b_queries++; }
           #endif
             return result;
           }
@@ -635,7 +642,7 @@ jobs:
           }
           static void draw_game(void) {
           #if PCE_SHOW_DIAGNOSTICS
-            char diag[32];
+            char diag[64];
             uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
           #endif
             if(video_received) {
@@ -669,6 +676,14 @@ jobs:
               label(6,86,1,diag,aqua);
               snprintf(diag,sizeof(diag),"PF %d GS-5551",pixel_format);
               label(6,96,1,diag,aqua);
+              snprintf(diag,sizeof(diag),"SQR %u TRI %u",!!(buttons_now&PAD_SQUARE),!!(buttons_now&PAD_TRIANGLE));
+              label(6,106,1,diag,aqua);
+              snprintf(diag,sizeof(diag),"T1 %u T2 %u",!!turbo_i_active,!!turbo_ii_active);
+              label(6,116,1,diag,aqua);
+              snprintf(diag,sizeof(diag),"A %u Q%u B %u Q%u",!!input_a_value,input_a_queries,!!input_b_value,input_b_queries);
+              label(6,126,1,diag,aqua);
+              snprintf(diag,sizeof(diag),"PHASE %u %u",turbo_i_counter%PCE_TURBO_PERIOD_FRAMES,turbo_ii_counter%PCE_TURBO_PERIOD_FRAMES);
+              label(6,136,1,diag,aqua);
           #endif
             } else title_screen("WAITING FOR VIDEO");
           }
@@ -757,6 +772,10 @@ jobs:
                 input_last_device=-1;
                 input_last_id=-1;
                 input_last_value=0;
+                input_a_queries=0;
+                input_b_queries=0;
+                input_a_value=0;
+                input_b_value=0;
           #endif
                 video_frame_updated=0;
                 retro_run();
@@ -1029,7 +1048,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2.4-Turbo-I-II-Test
+          name: PCE-Fast-PS2-V12.2.4-Turbo-I-II-Debug-Test
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
