@@ -1,4 +1,5 @@
-name: PCE Fast PS2 V12.2.4 - GS Native Color Fix Test
+
+name: PCE Fast PS2 V12.2.4 - Speed Fix Test (GS CT16 Direct Upload)
 
 on:
   push:
@@ -10,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.2.4 Color Fix ELF and publish artifacts
+    name: Build PCE Fast V12.2.4 Speed Fix ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -22,7 +23,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: V12.2.4 baseline; decode Aurora GS-native A1B5G5R5 pixels correctly; preserve joypad and USB/exFAT integration\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: confirmed color fix preserved; direct GS-native CT16 texture upload, no per-frame debug overlay, skip duplicate texture uploads; preserve joypad and USB/exFAT integration\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -53,9 +54,11 @@ jobs:
           test -s "$VIDEO_HEADER" || { echo 'PCE video.h not found'; exit 1; }
           grep -q 'AURORA_PS2_PCE_FAST' "$VIDEO_HEADER" || { echo 'Expected Aurora PS2 color path not found'; exit 1; }
           grep -q 'RED_SHIFT   0' "$VIDEO_HEADER" || { echo 'Expected GS-native red bit layout not found'; exit 1; }
+          grep -q 'GREEN_SHIFT 5' "$VIDEO_HEADER" || { echo 'Expected GS-native green bit layout not found'; exit 1; }
           grep -q 'BLUE_SHIFT  10' "$VIDEO_HEADER" || { echo 'Expected GS-native blue bit layout not found'; exit 1; }
+          grep -q '0x8000u' "$VIDEO_HEADER" || { echo 'Expected opaque alpha bit for GS CT16 not found'; exit 1; }
           grep -q -- '-DAURORA_PS2_PCE_FAST=1' "$CORE_MAKEFILE" || { echo 'Aurora PS2 core define missing'; exit 1; }
-          echo 'Verified: core palette uses GS-native A1B5G5R5 (R bits 0-4, G 5-9, B 10-14).'
+          echo 'Verified: source pixels are opaque GS-native A1B5G5R5; direct CT16 upload path is valid.'
 
       - name: Build ONLY the original PC Engine core archive
         shell: sh
@@ -138,15 +141,17 @@ jobs:
           /* Some PS2SDK/newlib headers do not expose snprintf under the current
              feature macros. Declare its standard signature explicitly. */
           extern int snprintf(char *str, size_t size, const char *format, ...);
-          
+
           #define MAX_FILES 128
           #define MAX_PATH 512
           #define ROM_LIMIT (8u * 1024u * 1024u)
           #define TEX_SIZE 512
-          
+          /* Diagnostics are disabled during gameplay; per-glyph GS primitives cost frame time. */
+          #define PCE_SHOW_DIAGNOSTICS 0
+
           extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[], audsrv_irx[];
           extern unsigned int size_usbd_irx, size_usbhdfsd_irx, size_iomanx_irx, size_filexio_irx, size_audsrv_irx;
-          
+
           typedef struct { char name[256]; int dir; } Entry;
           static Entry entries[MAX_FILES];
           static int nentries, selected, screen, status_code;
@@ -160,10 +165,11 @@ jobs:
           static iox_dirent_t dirent_buf __attribute__((aligned(64)));
           static iox_stat_t stat_buf __attribute__((aligned(64)));
           static unsigned char readbuf[16384] __attribute__((aligned(64)));
-          static uint32_t pixels[TEX_SIZE * TEX_SIZE] __attribute__((aligned(64)));
+          /* Store the core's native GS PSMCT16 pixels directly: half the memory and upload bandwidth of CT32. */
+          static uint16_t pixels16[TEX_SIZE * TEX_SIZE] __attribute__((aligned(64)));
           static GSTEXTURE tex;
           static GSGLOBAL *gs;
-          static int video_received, pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
+          static int video_received, video_frame_updated, pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
           static unsigned frame_w = 256, frame_h = 224;
           static int core_initialized, core_loaded;
           static int usb_initialized, iop_prepared;
@@ -172,15 +178,16 @@ jobs:
           static int pad_read_ok, pad_state_value = -1, pad_read_len;
           static unsigned int pad_raw_buttons = 0xffffu;
           static int pad_init_result, pad_open_result;
+          #if PCE_SHOW_DIAGNOSTICS
           static unsigned int input_active_mask, input_query_mask;
           static unsigned int input_mask_query_count;
           static unsigned int input_poll_count, input_state_count;
           static int input_last_port = -1, input_last_device = -1;
           static int input_last_id = -1, input_last_value;
+          #endif
           static int audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
           static unsigned audio_rate = 44100;
-          static unsigned char lut5[32], lut6[64];
-          
+
           static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:._()";
           static const unsigned long long glyphs[] = {
             0x4631fc62eULL,0x3e317c62fULL,0x78210843eULL,0x3e318c62fULL,0x7c217843fULL,
@@ -373,6 +380,7 @@ jobs:
             label(44,415,2,"UP DOWN X OPEN O BACK",aqua);
           }
           static void unload_game(void) {
+            video_frame_updated=0;
             if(core_loaded) {retro_unload_game();core_loaded=0;}
             if(game_data) {free(game_data);game_data=NULL;}
             game_size=0;
@@ -436,35 +444,46 @@ jobs:
           static void video_cb(const void *data,unsigned width,unsigned height,size_t pitch) {
             unsigned x,y,tw,th;
             if(!data || width==0 || height==0 || width>TEX_SIZE || height>TEX_SIZE)return;
-            frame_w=width;frame_h=height;
-            /* Upload only a power-of-two texture sized to this frame. */
+            if(pixel_format==RETRO_PIXEL_FORMAT_XRGB8888) {
+              if(pitch < (size_t)width * 4u)return;
+            } else if(pitch < (size_t)width * 2u) return;
+
+            frame_w=width; frame_h=height;
             tw=next_pow2(width); th=next_pow2(height);
             tex.Width=tw; tex.Height=th;
-            for(y=0;y<height;y++) {
-              const uint8_t *row=(const uint8_t *)data+y*pitch;
-              for(x=0;x<width;x++) {
-                unsigned r,g,b;
-                if(pixel_format==RETRO_PIXEL_FORMAT_XRGB8888) {
-                  unsigned p=((const uint32_t *)row)[x];
-                  r=(p>>16)&255u; g=(p>>8)&255u; b=p&255u;
-                } else if(pixel_format==RETRO_PIXEL_FORMAT_RGB565) {
-                  /* The Aurora PS2 core overrides normal RGB565 packing when
-                   * AURORA_PS2_PCE_FAST is defined. Its actual 16-bit pixels are
-                   * GS-native A1B5G5R5: R[4:0], G[9:5], B[14:10]. The core still
-                   * requests RETRO_PIXEL_FORMAT_RGB565, so treating these words
-                   * as standard RGB565 causes the red/pink color cast. */
-                  unsigned p=((const uint16_t *)row)[x];
-                  r=lut5[p&31u]; g=lut5[(p>>5)&31u]; b=lut5[(p>>10)&31u];
-                } else {
-                  /* Libretro 0RGB1555: R[14:10], G[9:5], B[4:0]. */
-                  unsigned p=((const uint16_t *)row)[x];
-                  r=lut5[(p>>10)&31u]; g=lut5[(p>>5)&31u]; b=lut5[p&31u];
+
+            if(pixel_format==RETRO_PIXEL_FORMAT_RGB565) {
+              /* In this verified Aurora build, RGB565 is the API label only:
+               * AURORA_PS2_PCE_FAST makes the source pixels native GS A1B5G5R5.
+               * Copy rows directly into a PSMCT16 texture; no per-pixel conversion. */
+              for(y=0;y<height;y++) {
+                const uint8_t *row=(const uint8_t *)data+(size_t)y*pitch;
+                memcpy(pixels16+(size_t)y*tw,row,(size_t)width*sizeof(uint16_t));
+              }
+            } else if(pixel_format==RETRO_PIXEL_FORMAT_XRGB8888) {
+              for(y=0;y<height;y++) {
+                const uint32_t *row=(const uint32_t *)((const uint8_t *)data+(size_t)y*pitch);
+                uint16_t *dst=pixels16+(size_t)y*tw;
+                for(x=0;x<width;x++) {
+                  uint32_t p=row[x];
+                  unsigned r=(p>>19)&31u, g=(p>>11)&31u, b=(p>>3)&31u;
+                  dst[x]=(uint16_t)(0x8000u|r|(g<<5)|(b<<10));
                 }
-                /* GS CT32 pixel word: R in bits 0-7, G 8-15, B 16-23, A 24-31. */
-                pixels[y*tw+x]=0x80000000u|(b<<16)|(g<<8)|r;
+              }
+            } else {
+              /* Standard Libretro 0RGB1555 -> GS-native A1B5G5R5. */
+              for(y=0;y<height;y++) {
+                const uint16_t *row=(const uint16_t *)((const uint8_t *)data+(size_t)y*pitch);
+                uint16_t *dst=pixels16+(size_t)y*tw;
+                for(x=0;x<width;x++) {
+                  uint16_t p=row[x];
+                  unsigned r=(p>>10)&31u, g=(p>>5)&31u, b=p&31u;
+                  dst[x]=(uint16_t)(0x8000u|r|(g<<5)|(b<<10));
+                }
               }
             }
             video_received=1;
+            video_frame_updated=1;
           }
           static size_t audio_many(const int16_t *samples,size_t frames) {
             size_t bytes;
@@ -504,26 +523,36 @@ jobs:
             return (uint16_t)mask;
           }
           /* The mask is reset immediately before retro_run(), not here: some cores may poll more than once per frame. */
-          static void input_poll(void) { input_poll_count++; }
+          static void input_poll(void) {
+          #if PCE_SHOW_DIAGNOSTICS
+            input_poll_count++;
+          #endif
+          }
           static int16_t input_state(unsigned port,unsigned device,unsigned index,unsigned id) {
             int16_t result=0;
             (void)index;
+          #if PCE_SHOW_DIAGNOSTICS
             input_state_count++;
             input_last_port=(int)port;
             input_last_device=(int)device;
             input_last_id=(int)id;
             input_last_value=0;
+          #endif
             /* Beetle PCE Fast may query the multitap's fifth port; this frontend exposes the one physical pad on ports 0-4. */
             if(port>4 || (device & RETRO_DEVICE_MASK)!=RETRO_DEVICE_JOYPAD)
               return 0;
             if(id==RETRO_DEVICE_ID_JOYPAD_MASK) {
-              input_mask_query_count++;
               result=(int16_t)retro_joypad_mask();
+          #if PCE_SHOW_DIAGNOSTICS
+              input_mask_query_count++;
               input_last_value=(int)(uint16_t)result;
               input_active_mask |= (unsigned int)(uint16_t)result;
+          #endif
               return result;
             }
+          #if PCE_SHOW_DIAGNOSTICS
             if(id<16) input_query_mask |= (1u<<id);
+          #endif
             switch(id) {
               case RETRO_DEVICE_ID_JOYPAD_UP: result=!!(buttons_now&PAD_UP); break;
               case RETRO_DEVICE_ID_JOYPAD_DOWN: result=!!(buttons_now&PAD_DOWN); break;
@@ -543,8 +572,10 @@ jobs:
               case RETRO_DEVICE_ID_JOYPAD_R3: result=!!(buttons_now&PAD_R3); break;
               default: result=0; break;
             }
+          #if PCE_SHOW_DIAGNOSTICS
             input_last_value=result;
             if(result && id<16) input_active_mask |= (1u<<id);
+          #endif
             return result;
           }
           static int begin_game(const char *path) {
@@ -581,20 +612,24 @@ jobs:
             return 0;
           }
           static void draw_game(void) {
+          #if PCE_SHOW_DIAGNOSTICS
             char diag[32];
             uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
+          #endif
             if(video_received) {
               gsKit_clear(gs,GS_SETREG_RGBAQ(0,0,0,0x80,0));
-              tex.Mem=(void *)pixels;
-              gsKit_texture_upload(gs,&tex);
+              tex.Mem=(u32 *)pixels16;
+              if(video_frame_updated) {
+                gsKit_texture_upload(gs,&tex);
+                video_frame_updated=0;
+              }
               gsKit_prim_sprite_texture(gs,&tex,
                 0.0f,0.0f,0.0f,0.0f,640.0f,448.0f,
                 (float)frame_w,(float)frame_h,1,
                 GS_SETREG_RGBAQ(0x80,0x80,0x80,0x80,0));
-              /* Small status overlay makes audio and pad failures observable on-console. */
+          #if PCE_SHOW_DIAGNOSTICS
               if(audio_ready) label(6,6,1,"AUDIO OK",aqua);
               else { snprintf(diag,sizeof(diag),"AUDIO ERR %d",audio_error); label(6,6,1,diag,aqua); }
-              /* Live-read status plus raw and mapped button masks. */
               label(6,16,1,pad_read_ok?"PAD READ OK":"PAD NO DATA",aqua);
               snprintf(diag,sizeof(diag),"STATE %d LEN %d",pad_state_value,pad_read_len);
               label(6,26,1,diag,aqua);
@@ -612,9 +647,8 @@ jobs:
               label(6,86,1,diag,aqua);
               snprintf(diag,sizeof(diag),"PF %d GS-5551",pixel_format);
               label(6,96,1,diag,aqua);
-            } else {
-              title_screen("WAITING FOR VIDEO");
-            }
+          #endif
+            } else title_screen("WAITING FOR VIDEO");
           }
           int main(int argc,char **argv) {
             (void)argc;(void)argv;
@@ -629,10 +663,8 @@ jobs:
             gsKit_init_screen(gs);
             gsKit_mode_switch(gs,GS_ONESHOT);
             memset(&tex,0,sizeof(tex));
-            tex.Width=TEX_SIZE;tex.Height=TEX_SIZE;tex.PSM=GS_PSM_CT32;tex.Mem=(u32 *)pixels;
-            tex.Vram=gsKit_vram_alloc(gs,gsKit_texture_size(TEX_SIZE,TEX_SIZE,GS_PSM_CT32),GSKIT_ALLOC_USERBUFFER);
-            { unsigned i; for(i=0;i<32;i++) lut5[i]=(unsigned char)((i*255u+15u)/31u);
-              for(i=0;i<64;i++) lut6[i]=(unsigned char)((i*255u+31u)/63u); }
+            tex.Width=TEX_SIZE;tex.Height=TEX_SIZE;tex.PSM=GS_PSM_CT16;tex.Mem=(u32 *)pixels16;
+            tex.Vram=gsKit_vram_alloc(gs,gsKit_texture_size(TEX_SIZE,TEX_SIZE,GS_PSM_CT16),GSKIT_ALLOC_USERBUFFER);
             SifInitRpc(0);
             /* Keep the PS2 ROM module pair used by the current frontend. */
             SifLoadModule("rom0:XSIO2MAN",0,NULL);
@@ -692,7 +724,8 @@ jobs:
                   buttons_prev=buttons_now;
                   continue;
                 }
-                /* Per-frame diagnostics are reset here, before the core polls input. */
+                /* Debug-only counters are omitted from the performance build. */
+          #if PCE_SHOW_DIAGNOSTICS
                 input_active_mask=0;
                 input_query_mask=0;
                 input_mask_query_count=0;
@@ -702,6 +735,8 @@ jobs:
                 input_last_device=-1;
                 input_last_id=-1;
                 input_last_value=0;
+          #endif
+                video_frame_updated=0;
                 retro_run();
                 draw_game();refresh_screen();
               }
@@ -712,7 +747,7 @@ jobs:
           cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
           EE_BIN = PCE-Fast-Only-PS2.ELF
           EE_OBJS = pce_only.o usbd.o usbhdfsd.o iomanx.o filexio.o audsrv.o $(PCE_OPTIONAL_OBJS)
-          EE_CFLAGS += -O2 -G0 -Wall -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ -include $(PS2_NEWLIB_SYS_TYPES)
+          EE_CFLAGS += -O3 -G0 -Wall -fomit-frame-pointer -funroll-loops -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ -include $(PS2_NEWLIB_SYS_TYPES)
           EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC) -I$(PCE_AUDSRV_INC)
           EE_LDFLAGS += -L$(GSKIT)/lib -L$(PS2SDK)/ports/lib
           EE_LIBS += $(PCE_RAW_LIB) $(PCE_AUDSRV_LIB) $(PCE_VORBIS_LIBS) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
@@ -972,7 +1007,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2.4-Color-Fix-Test
+          name: PCE-Fast-PS2-V12.2.4-Speed-Fix-Test
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
