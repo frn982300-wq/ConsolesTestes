@@ -1,5 +1,5 @@
 
-name: PCE Fast PS2 V12.2.4 - Speed Fix Test (GS CT16 Direct Upload)
+name: PCE Fast PS2 V12.2.4 - Turbo I II Test (Square Triangle)
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.2.4 Speed Fix ELF and publish artifacts
+    name: Build PCE Fast V12.2.4 Speed Fix + Turbo I II ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -23,7 +23,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: confirmed color fix preserved; direct GS-native CT16 texture upload, no per-frame debug overlay, skip duplicate texture uploads; preserve joypad and USB/exFAT integration\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: preserve confirmed speed fix and corrected colors; direct GS-native CT16 upload; Turbo I=PS2 Square, Turbo II=PS2 Triangle; normal I=Circle, II=Cross; preserve USB/exFAT integration\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -82,6 +82,7 @@ jobs:
             exit 1
           }
           echo 'Verified: native Beetle PCE Fast retro_run function.'
+          echo 'Next frontend test: Square=Turbo I, Triangle=Turbo II; speed/color/exFAT base preserved.'
 
       - name: Extract the tested V10/V11 exFAT driver pair
         shell: sh
@@ -162,6 +163,11 @@ jobs:
           static char pad_buf[256] __attribute__((aligned(64)));
           static struct padButtonStatus pad_info;
           static unsigned int buttons_now, buttons_prev, buttons_edge;
+          /* Hold-to-fire turbo: about 15 pulses/second at the PCE Fast ~60 Hz frame rate. */
+          #define PCE_TURBO_PERIOD_FRAMES 4u
+          #define PCE_TURBO_ON_FRAMES 2u
+          static unsigned int turbo_i_counter, turbo_ii_counter;
+          static int turbo_i_active, turbo_ii_active;
           static iox_dirent_t dirent_buf __attribute__((aligned(64)));
           static iox_stat_t stat_buf __attribute__((aligned(64)));
           static unsigned char readbuf[16384] __attribute__((aligned(64)));
@@ -501,13 +507,14 @@ jobs:
             int16_t pair[2]; pair[0]=left; pair[1]=right;
             (void)audio_many(pair,1);
           }
-          /* Translate PS2 pad bits into the bit positions required by Libretro's JOYPAD_MASK query. */
+          /* PS2 Circle = PCE I, Cross = PCE II; Square/Triangle are hold-to-fire Turbo I/II. */
           static uint16_t retro_joypad_mask(void) {
             unsigned int mask=0;
-            if(buttons_now&PAD_CROSS)    mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_B);
-            if(buttons_now&PAD_CIRCLE)   mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_A);
-            if(buttons_now&PAD_SQUARE)   mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_X);
-            if(buttons_now&PAD_TRIANGLE) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_Y);
+            if((buttons_now&PAD_CROSS) || turbo_ii_active)
+              mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_B);
+            if((buttons_now&PAD_CIRCLE) || turbo_i_active)
+              mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_A);
+            /* Do not forward Square/Triangle as PCE buttons III/IV or native toggle hotkeys. */
             if(buttons_now&PAD_SELECT)   mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_SELECT);
             if(buttons_now&PAD_START)    mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_START);
             if(buttons_now&PAD_UP)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_UP);
@@ -522,8 +529,23 @@ jobs:
             if(buttons_now&PAD_R3)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R3);
             return (uint16_t)mask;
           }
-          /* The mask is reset immediately before retro_run(), not here: some cores may poll more than once per frame. */
+          /* Called once at the start of each emulated frame. Turbo begins immediately,
+             stays active for 2 frames, then alternates 2 off / 2 on while held. */
           static void input_poll(void) {
+            if(buttons_now & PAD_SQUARE) {
+              turbo_i_active = ((turbo_i_counter % PCE_TURBO_PERIOD_FRAMES) < PCE_TURBO_ON_FRAMES);
+              turbo_i_counter++;
+            } else {
+              turbo_i_counter = 0;
+              turbo_i_active = 0;
+            }
+            if(buttons_now & PAD_TRIANGLE) {
+              turbo_ii_active = ((turbo_ii_counter % PCE_TURBO_PERIOD_FRAMES) < PCE_TURBO_ON_FRAMES);
+              turbo_ii_counter++;
+            } else {
+              turbo_ii_counter = 0;
+              turbo_ii_active = 0;
+            }
           #if PCE_SHOW_DIAGNOSTICS
             input_poll_count++;
           #endif
@@ -558,12 +580,12 @@ jobs:
               case RETRO_DEVICE_ID_JOYPAD_DOWN: result=!!(buttons_now&PAD_DOWN); break;
               case RETRO_DEVICE_ID_JOYPAD_LEFT: result=!!(buttons_now&PAD_LEFT); break;
               case RETRO_DEVICE_ID_JOYPAD_RIGHT: result=!!(buttons_now&PAD_RIGHT); break;
-              case RETRO_DEVICE_ID_JOYPAD_B: result=!!(buttons_now&PAD_CROSS); break;
-              case RETRO_DEVICE_ID_JOYPAD_A: result=!!(buttons_now&PAD_CIRCLE); break;
+              case RETRO_DEVICE_ID_JOYPAD_B: result=!!((buttons_now&PAD_CROSS) || turbo_ii_active); break;
+              case RETRO_DEVICE_ID_JOYPAD_A: result=!!((buttons_now&PAD_CIRCLE) || turbo_i_active); break;
               case RETRO_DEVICE_ID_JOYPAD_START: result=!!(buttons_now&PAD_START); break;
               case RETRO_DEVICE_ID_JOYPAD_SELECT: result=!!(buttons_now&PAD_SELECT); break;
-              case RETRO_DEVICE_ID_JOYPAD_X: result=!!(buttons_now&PAD_SQUARE); break;
-              case RETRO_DEVICE_ID_JOYPAD_Y: result=!!(buttons_now&PAD_TRIANGLE); break;
+              case RETRO_DEVICE_ID_JOYPAD_X: result=0; break; /* Square is Turbo I, not PCE IV. */
+              case RETRO_DEVICE_ID_JOYPAD_Y: result=0; break; /* Triangle is Turbo II, not PCE III. */
               case RETRO_DEVICE_ID_JOYPAD_L: result=!!(buttons_now&PAD_L1); break;
               case RETRO_DEVICE_ID_JOYPAD_R: result=!!(buttons_now&PAD_R1); break;
               case RETRO_DEVICE_ID_JOYPAD_L2: result=!!(buttons_now&PAD_L2); break;
@@ -1007,7 +1029,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2.4-Speed-Fix-Test
+          name: PCE-Fast-PS2-V12.2.4-Turbo-I-II-Test
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
