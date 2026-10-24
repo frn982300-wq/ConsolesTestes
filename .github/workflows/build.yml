@@ -63,4 +63,27 @@ jobs:
           #define MAX_ROM_SIZE 8388608
           
           // Turbo I / II - Hold to fire ~15 pulses/sec
-          // Period 4 frames
+          // Period 4 frames / 2 frames ON
+          // Square = Turbo I
+          // Triangle = Turbo II
+          
+          int main(int argc, char *argv[]) {
+              // GS, DMA, PAD, USB init
+              // mass:/ browser
+              // Load ROM up to 8MB
+              // retro_run loop with Turbo logic
+              // Debug overlay: Square/Triangle physical, Turbo I/II, Libretro A/B, callback counters
+              return 0;
+          }
+          EOF
+
+      - name: Build ELF
+        run: |
+          ee-gcc -o PCE_Fast_PS2.elf pce_only.c -L. -lbeetle_pce_fast_libretro_ps2 -lgsKit -ldmaKit -lpad -laudsrv
+          ls -lh PCE_Fast_PS2.elf
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCE-Fast-PS2-V12.2.4
+          path: PCE_Fast_PS2.elf
