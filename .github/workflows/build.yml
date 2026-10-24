@@ -1,9 +1,6 @@
-
-name: PCE Fast PS2 V12.2.4 - Turbo I II Debug Fix (Square Triangle)
+name: PCE Fast PS2 V12.2.4 - Save State Load State (5 Slots)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +8,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.2.4 Speed Fix + Turbo I II Debug ELF and publish artifacts
+    name: Build PCE Fast V12.2.4 Save/Load State + Turbo I II ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -23,7 +20,8 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: diagnostic build; preserve prior speed/color code; show physical Square/Triangle, Turbo states, Libretro A/B values and callback counts; preserve USB/exFAT integration\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: preserve confirmed speed/color/exFAT/Turbo baseline; add 5 per-game Save State and Load State slots using Libretro serialization and USB exFAT\n' >> artifact-staging/workflow-status.txt
+          printf 'In-game menu: L1+R1+SELECT; D-pad Up/Down; Cross=confirm; Circle=back. State files: mass:/PCEFAST/STATES/ (or mass0:/ if that alias loaded the ROM).\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -81,16 +79,20 @@ jobs:
             echo 'Raw archive does not export the expected Libretro API.'
             exit 1
           }
-          echo 'Verified: native Beetle PCE Fast retro_run function.'
-          echo 'Diagnostic frontend test: watch SQR/TRI, T1/T2, A/B values, PHASE and callback counters on the PS2.'
+          for symbol in retro_serialize_size retro_serialize retro_unserialize; do
+            grep -Eq "[[:space:]]${symbol}$" pce-symbols.txt || {
+              echo "Required Save State API missing from core: ${symbol}"
+              exit 1
+            }
+          done
+          echo 'Verified: retro_run and all three Libretro Save/Load State exports.'
+          echo 'Save State test: open menu with L1+R1+SELECT; D-pad moves; Cross confirms; Circle returns. Test all five slots on USB exFAT.'
 
       - name: Extract the tested V10/V11 exFAT driver pair
         shell: sh
         run: |
           set -eu
           mkdir -p pce-only
-          # Reuse the exact pair previously tested in the PS2 exFAT V10/V11 project.
-          # The repository must contain this archive at its root.
           test -s FCEUmm-PS2-exFAT-integrated-2026.zip || {
             echo 'Missing FCEUmm-PS2-exFAT-integrated-2026.zip in repository root.'
             echo 'Add the same driver archive used by the working V10/V11 workflow.'
@@ -121,7 +123,6 @@ jobs:
            * No ROM or firmware bundled. Uses the previously tested V10/V11 exFAT driver pair.
            * Native PS2 libvorbisfile optional; fallback supports cartridges only.
            */
-          /* POSIX types are supplied through the explicit PS2 toolchain newlib header in EE_CFLAGS. */
           #include <gsKit.h>
           #include <dmaKit.h>
           #include <libpad.h>
@@ -139,15 +140,12 @@ jobs:
           #include <string.h>
           #include <ctype.h>
           #include <stdint.h>
-          /* Some PS2SDK/newlib headers do not expose snprintf under the current
-             feature macros. Declare its standard signature explicitly. */
           extern int snprintf(char *str, size_t size, const char *format, ...);
 
           #define MAX_FILES 128
           #define MAX_PATH 512
           #define ROM_LIMIT (8u * 1024u * 1024u)
           #define TEX_SIZE 512
-          /* Diagnostic overlay intentionally enabled for this test; disable after troubleshooting. */
           #define PCE_SHOW_DIAGNOSTICS 1
 
           extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[], audsrv_irx[];
@@ -163,18 +161,14 @@ jobs:
           static char pad_buf[256] __attribute__((aligned(64)));
           static struct padButtonStatus pad_info;
           static unsigned int buttons_now, buttons_prev, buttons_edge;
-          /* Hold-to-fire turbo: about 15 pulses/second at the PCE Fast ~60 Hz frame rate. */
           #define PCE_TURBO_PERIOD_FRAMES 4u
           #define PCE_TURBO_ON_FRAMES 2u
           static unsigned int turbo_i_counter, turbo_ii_counter;
           static int turbo_i_active, turbo_ii_active;
-          /* The frontend advances Turbo once per emulated frame. If the core
-             also calls input_poll(), the guard prevents a second advance. */
           static int turbo_updated_this_frame;
           static iox_dirent_t dirent_buf __attribute__((aligned(64)));
           static iox_stat_t stat_buf __attribute__((aligned(64)));
           static unsigned char readbuf[16384] __attribute__((aligned(64)));
-          /* Store the core's native GS PSMCT16 pixels directly: half the memory and upload bandwidth of CT32. */
           static uint16_t pixels16[TEX_SIZE * TEX_SIZE] __attribute__((aligned(64)));
           static GSTEXTURE tex;
           static GSGLOBAL *gs;
@@ -183,7 +177,6 @@ jobs:
           static int core_initialized, core_loaded;
           static int usb_initialized, iop_prepared;
           static int pad_ready;
-          /* Port-open status is not proof of live input. */
           static int pad_read_ok, pad_state_value = -1, pad_read_len;
           static unsigned int pad_raw_buttons = 0xffffu;
           static int pad_init_result, pad_open_result;
@@ -198,6 +191,22 @@ jobs:
           #endif
           static int audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
           static unsigned audio_rate = 44100;
+
+          #define PCE_STATE_SLOTS 5
+          #define PCE_STATE_MAX_BYTES (16u * 1024u * 1024u)
+          #define PCE_STATE_VERSION 1u
+          typedef struct {
+            char magic[8];
+            uint32_t version;
+            uint32_t game_hash;
+            uint32_t payload_size;
+            uint32_t payload_hash;
+            uint32_t turbo_i_counter;
+            uint32_t turbo_ii_counter;
+          } PCEStateHeader;
+          static int state_menu_selected = 0;
+          static char state_message[64] = "";
+          static int state_message_frames;
 
           static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:._()";
           static const unsigned long long glyphs[] = {
@@ -294,7 +303,6 @@ jobs:
               SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
             }
             if(!audio_module_loaded) {
-              /* LIBSD is the PS2 IOP sound driver required by audsrv. */
               (void)SifLoadModule("rom0:LIBSD",0,NULL);
               r=load_mod(audsrv_irx,size_audsrv_irx);
               if(r<0) { audio_error=r; return r; }
@@ -424,6 +432,206 @@ jobs:
             game_size=sz;
             return 0;
           }
+          static uint32_t state_hash_bytes(const unsigned char *data, size_t size) {
+            uint32_t h = 2166136261u;
+            size_t i;
+            for(i=0;i<size;i++) { h ^= data[i]; h *= 16777619u; }
+            return h;
+          }
+          static uint32_t state_game_hash(void) {
+            const char *p = game_path;
+            const char *colon = strchr(game_path, ':');
+            uint32_t h = 2166136261u;
+            if(colon && colon[1]=='/') p = colon + 2;
+            while(*p) {
+              unsigned char c = (unsigned char)tolower((unsigned char)*p++);
+              h ^= c; h *= 16777619u;
+            }
+            return h;
+          }
+          static void state_set_message(const char *message) {
+            if(!message) message = "";
+            strncpy(state_message, message, sizeof(state_message)-1);
+            state_message[sizeof(state_message)-1] = 0;
+            state_message_frames = state_message[0] ? 180 : 0;
+          }
+          static int state_make_paths(int slot, char *dir1, size_t dir1_cap,
+                                      char *dir2, size_t dir2_cap,
+                                      char *path, size_t path_cap) {
+            const char *root;
+            const char *base;
+            const char *dot;
+            char slug[64];
+            size_t j=0;
+            int n;
+            if(slot<0 || slot>=PCE_STATE_SLOTS || !game_path[0]) return -1;
+            root = !strncmp(game_path,"mass0:/",7) ? "mass0:/" : "mass:/";
+            n=snprintf(dir1,dir1_cap,"%sPCEFAST",root);
+            if(n<0 || (size_t)n>=dir1_cap) return -2;
+            n=snprintf(dir2,dir2_cap,"%sPCEFAST/STATES",root);
+            if(n<0 || (size_t)n>=dir2_cap) return -3;
+            base=strrchr(game_path,'/'); base=base?base+1:game_path;
+            dot=strrchr(base,'.');
+            while(*base && base!=dot && j<sizeof(slug)-1) {
+              unsigned char c=(unsigned char)*base++;
+              if(isalnum(c)) slug[j++]=(char)toupper(c);
+              else if(j && slug[j-1]!='_') slug[j++]='_';
+            }
+            while(j && slug[j-1]=='_') --j;
+            if(!j) { slug[0]='G'; slug[1]='A'; slug[2]='M'; slug[3]='E'; j=4; }
+            slug[j]=0;
+            n=snprintf(path,path_cap,"%sPCEFAST/STATES/%s_%08X.slot%d",
+                       root,slug,(unsigned int)state_game_hash(),slot+1);
+            if(n<0 || (size_t)n>=path_cap) return -4;
+            return 0;
+          }
+          static int state_ensure_directory(const char *path) {
+            int d=fileXioDopen(path);
+            if(d>=0) { fileXioDclose(d); return 0; }
+            (void)fileXioMkdir(path,0777);
+            d=fileXioDopen(path);
+            if(d<0) return d;
+            fileXioDclose(d);
+            return 0;
+          }
+          static int state_ensure_directories(const char *dir1,const char *dir2) {
+            if(state_ensure_directory(dir1)<0) return -1;
+            if(state_ensure_directory(dir2)<0) return -2;
+            return 0;
+          }
+          static int state_write_exact(int fd,const void *buffer,size_t size) {
+            const unsigned char *p=(const unsigned char *)buffer;
+            while(size) {
+              int chunk=(size>(size_t)16384)?16384:(int)size;
+              int n=fileXioWrite(fd,(void *)p,chunk);
+              if(n<=0 || n>chunk) return -1;
+              p+=(size_t)n; size-=(size_t)n;
+            }
+            return 0;
+          }
+          static int state_read_exact(int fd,void *buffer,size_t size) {
+            unsigned char *p=(unsigned char *)buffer;
+            while(size) {
+              int chunk=(size>(size_t)16384)?16384:(int)size;
+              int n=fileXioRead(fd,p,chunk);
+              if(n<=0 || n>chunk) return -1;
+              p+=(size_t)n; size-=(size_t)n;
+            }
+            return 0;
+          }
+          static int state_save_slot(int slot) {
+            char dir1[MAX_PATH],dir2[MAX_PATH],path[MAX_PATH],tmp[MAX_PATH];
+            size_t size;
+            unsigned char *payload;
+            PCEStateHeader header;
+            int fd,r;
+            if(!core_loaded) { state_set_message("NO GAME LOADED"); return -1; }
+            size=retro_serialize_size();
+            if(!size || size>PCE_STATE_MAX_BYTES) { state_set_message("SAVE STATE UNSUPPORTED"); return -2; }
+            payload=(unsigned char *)malloc(size);
+            if(!payload) { state_set_message("SAVE STATE OUT OF MEMORY"); return -3; }
+            if(!retro_serialize(payload,size)) {
+              free(payload); state_set_message("SAVE STATE FAILED"); return -4;
+            }
+            r=state_make_paths(slot,dir1,sizeof(dir1),dir2,sizeof(dir2),path,sizeof(path));
+            if(r<0 || state_ensure_directories(dir1,dir2)<0) {
+              free(payload); state_set_message("STATE USB DIRECTORY ERROR"); return -5;
+            }
+            if(snprintf(tmp,sizeof(tmp),"%s.tmp",path)<0 || strlen(path)+4>=sizeof(tmp)) {
+              free(payload); state_set_message("STATE PATH TOO LONG"); return -6;
+            }
+            memset(&header,0,sizeof(header));
+            memcpy(header.magic,"PCESTATE",8);
+            header.version=PCE_STATE_VERSION;
+            header.game_hash=state_game_hash();
+            header.payload_size=(uint32_t)size;
+            header.payload_hash=state_hash_bytes(payload,size);
+            header.turbo_i_counter=turbo_i_counter;
+            header.turbo_ii_counter=turbo_ii_counter;
+            fd=fileXioOpen(tmp,FIO_O_WRONLY|FIO_O_CREAT|FIO_O_TRUNC);
+            if(fd<0) { free(payload); state_set_message("STATE FILE OPEN ERROR"); return -7; }
+            r=state_write_exact(fd,&header,sizeof(header));
+            if(r==0) r=state_write_exact(fd,payload,size);
+            if(fileXioClose(fd)<0) r=-1;
+            free(payload);
+            if(r<0) { fileXioRemove(tmp); state_set_message("STATE WRITE ERROR"); return -8; }
+            (void)fileXioRemove(path);
+            if(fileXioRename(tmp,path)<0) {
+              fileXioRemove(tmp); state_set_message("STATE RENAME ERROR"); return -9;
+            }
+            state_set_message("STATE SAVED");
+            return 0;
+          }
+          static int state_load_slot(int slot) {
+            char dir1[MAX_PATH],dir2[MAX_PATH],path[MAX_PATH];
+            PCEStateHeader header;
+            size_t expected;
+            unsigned char *payload;
+            int fd,r;
+            if(!core_loaded) { state_set_message("NO GAME LOADED"); return -1; }
+            expected=retro_serialize_size();
+            if(!expected || expected>PCE_STATE_MAX_BYTES) { state_set_message("LOAD STATE UNSUPPORTED"); return -2; }
+            r=state_make_paths(slot,dir1,sizeof(dir1),dir2,sizeof(dir2),path,sizeof(path));
+            if(r<0) { state_set_message("STATE PATH ERROR"); return -3; }
+            memset(&stat_buf,0,sizeof(stat_buf));
+            if(fileXioGetStat(path,&stat_buf)<0 || stat_buf.hisize || stat_buf.size<sizeof(header)) {
+              state_set_message("STATE SLOT EMPTY"); return -4;
+            }
+            fd=fileXioOpen(path,FIO_O_RDONLY);
+            if(fd<0) { state_set_message("STATE OPEN ERROR"); return -5; }
+            r=state_read_exact(fd,&header,sizeof(header));
+            if(r<0) { fileXioClose(fd); state_set_message("STATE HEADER ERROR"); return -6; }
+            if(memcmp(header.magic,"PCESTATE",8)!=0 || header.version!=PCE_STATE_VERSION ||
+               header.game_hash!=state_game_hash() || !header.payload_size ||
+               header.payload_size>PCE_STATE_MAX_BYTES || header.payload_size!=expected ||
+               (uint64_t)sizeof(header)+(uint64_t)header.payload_size!=(uint64_t)stat_buf.size) {
+              fileXioClose(fd); state_set_message("STATE INCOMPATIBLE"); return -7;
+            }
+            payload=(unsigned char *)malloc((size_t)header.payload_size);
+            if(!payload) { fileXioClose(fd); state_set_message("LOAD STATE OUT OF MEMORY"); return -8; }
+            r=state_read_exact(fd,payload,(size_t)header.payload_size);
+            if(fileXioClose(fd)<0) r=-1;
+            if(r<0 || state_hash_bytes(payload,(size_t)header.payload_size)!=header.payload_hash) {
+              free(payload); state_set_message("STATE CORRUPT"); return -9;
+            }
+            if(!retro_unserialize(payload,(size_t)header.payload_size)) {
+              free(payload); state_set_message("STATE RESTORE FAILED"); return -10;
+            }
+            free(payload);
+            turbo_i_counter=header.turbo_i_counter;
+            turbo_ii_counter=header.turbo_ii_counter;
+            turbo_i_active=0; turbo_ii_active=0; turbo_updated_this_frame=0;
+            video_received=0; video_frame_updated=0;
+            state_set_message("STATE LOADED");
+            return 0;
+          }
+          static void render_state_menu(void) {
+            int i;
+            char item[40];
+            uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
+            uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
+            title_screen("SAVE / LOAD STATE");
+            label(30,119,1,"UP DOWN X SELECT O BACK",aqua);
+            for(i=0;i<12;i++) {
+              if(i<PCE_STATE_SLOTS) snprintf(item,sizeof(item),"SAVE SLOT %d",i+1);
+              else if(i<PCE_STATE_SLOTS*2) snprintf(item,sizeof(item),"LOAD SLOT %d",i-PCE_STATE_SLOTS+1);
+              else if(i==10) snprintf(item,sizeof(item),"RESUME GAME");
+              else snprintf(item,sizeof(item),"EXIT TO BROWSER");
+              label(54,142+i*21,2,item,i==state_menu_selected?aqua:white);
+            }
+            if(state_message_frames>0 && state_message[0]) label(20,408,1,state_message,aqua);
+          }
+          static void state_menu_activate(void) {
+            if(state_menu_selected<PCE_STATE_SLOTS) {
+              (void)state_save_slot(state_menu_selected);
+            } else if(state_menu_selected<PCE_STATE_SLOTS*2) {
+              (void)state_load_slot(state_menu_selected-PCE_STATE_SLOTS);
+            } else if(state_menu_selected==10) {
+              screen=2; buttons_prev=buttons_now; buttons_edge=0;
+            } else {
+              unload_game(); screen=1; buttons_prev=buttons_now; buttons_edge=0;
+            }
+          }
           static bool core_environment(unsigned command,void *data) {
             switch(command) {
               case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
@@ -440,14 +648,14 @@ jobs:
               case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
                 *(bool *)data=false;return true;
               case RETRO_ENVIRONMENT_GET_VARIABLE:
-                return false; /* Let the core use its defaults. */
+                return false;
               case RETRO_ENVIRONMENT_SET_VARIABLES:
               case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
               case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
                 return true;
           #ifdef RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE
               case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE:
-                *(int *)data=3;return true; /* Enable both video (1) and audio (2). */
+                *(int *)data=3;return true;
           #endif
               default:return false;
             }
@@ -458,15 +666,10 @@ jobs:
             if(pixel_format==RETRO_PIXEL_FORMAT_XRGB8888) {
               if(pitch < (size_t)width * 4u)return;
             } else if(pitch < (size_t)width * 2u) return;
-
             frame_w=width; frame_h=height;
             tw=next_pow2(width); th=next_pow2(height);
             tex.Width=tw; tex.Height=th;
-
             if(pixel_format==RETRO_PIXEL_FORMAT_RGB565) {
-              /* In this verified Aurora build, RGB565 is the API label only:
-               * AURORA_PS2_PCE_FAST makes the source pixels native GS A1B5G5R5.
-               * Copy rows directly into a PSMCT16 texture; no per-pixel conversion. */
               for(y=0;y<height;y++) {
                 const uint8_t *row=(const uint8_t *)data+(size_t)y*pitch;
                 memcpy(pixels16+(size_t)y*tw,row,(size_t)width*sizeof(uint16_t));
@@ -482,7 +685,6 @@ jobs:
                 }
               }
             } else {
-              /* Standard Libretro 0RGB1555 -> GS-native A1B5G5R5. */
               for(y=0;y<height;y++) {
                 const uint16_t *row=(const uint16_t *)((const uint8_t *)data+(size_t)y*pitch);
                 uint16_t *dst=pixels16+(size_t)y*tw;
@@ -512,53 +714,43 @@ jobs:
             int16_t pair[2]; pair[0]=left; pair[1]=right;
             (void)audio_many(pair,1);
           }
-          /* PS2 Circle = PCE I, Cross = PCE II; Square/Triangle are hold-to-fire Turbo I/II. */
           static uint16_t retro_joypad_mask(void) {
             unsigned int mask=0;
             if((buttons_now&PAD_CROSS) || turbo_ii_active)
               mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_B);
             if((buttons_now&PAD_CIRCLE) || turbo_i_active)
               mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_A);
-            /* Do not forward Square/Triangle as PCE buttons III/IV or native toggle hotkeys. */
-            if(buttons_now&PAD_SELECT)   mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_SELECT);
-            if(buttons_now&PAD_START)    mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_START);
-            if(buttons_now&PAD_UP)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_UP);
-            if(buttons_now&PAD_DOWN)     mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_DOWN);
-            if(buttons_now&PAD_LEFT)     mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_LEFT);
-            if(buttons_now&PAD_RIGHT)    mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_RIGHT);
-            if(buttons_now&PAD_L1)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L);
-            if(buttons_now&PAD_R1)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R);
-            if(buttons_now&PAD_L2)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L2);
-            if(buttons_now&PAD_R2)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R2);
-            if(buttons_now&PAD_L3)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L3);
-            if(buttons_now&PAD_R3)       mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R3);
+            if(buttons_now&PAD_SELECT) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_SELECT);
+            if(buttons_now&PAD_START) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_START);
+            if(buttons_now&PAD_UP) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_UP);
+            if(buttons_now&PAD_DOWN) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_DOWN);
+            if(buttons_now&PAD_LEFT) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_LEFT);
+            if(buttons_now&PAD_RIGHT) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_RIGHT);
+            if(buttons_now&PAD_L1) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L);
+            if(buttons_now&PAD_R1) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R);
+            if(buttons_now&PAD_L2) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L2);
+            if(buttons_now&PAD_R2) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R2);
+            if(buttons_now&PAD_L3) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L3);
+            if(buttons_now&PAD_R3) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R3);
             return (uint16_t)mask;
           }
-          /* Update Turbo once per emulated frame. The PS2 frontend calls this
-             explicitly before retro_run(), because the tested core did not call
-             the registered input_poll callback (diagnostic POLL stayed at zero).
-             The guard prevents double-advancing if the core does call it later. */
           static void input_poll(void) {
           #if PCE_SHOW_DIAGNOSTICS
             input_poll_count++;
           #endif
-            if(turbo_updated_this_frame)
-              return;
-            turbo_updated_this_frame = 1;
-
+            if(turbo_updated_this_frame) return;
+            turbo_updated_this_frame=1;
             if(buttons_now & PAD_SQUARE) {
-              turbo_i_active = ((turbo_i_counter % PCE_TURBO_PERIOD_FRAMES) < PCE_TURBO_ON_FRAMES);
+              turbo_i_active=((turbo_i_counter % PCE_TURBO_PERIOD_FRAMES)<PCE_TURBO_ON_FRAMES);
               turbo_i_counter++;
             } else {
-              turbo_i_counter = 0;
-              turbo_i_active = 0;
+              turbo_i_counter=0; turbo_i_active=0;
             }
             if(buttons_now & PAD_TRIANGLE) {
-              turbo_ii_active = ((turbo_ii_counter % PCE_TURBO_PERIOD_FRAMES) < PCE_TURBO_ON_FRAMES);
+              turbo_ii_active=((turbo_ii_counter % PCE_TURBO_PERIOD_FRAMES)<PCE_TURBO_ON_FRAMES);
               turbo_ii_counter++;
             } else {
-              turbo_ii_counter = 0;
-              turbo_ii_active = 0;
+              turbo_ii_counter=0; turbo_ii_active=0;
             }
           }
           static int16_t input_state(unsigned port,unsigned device,unsigned index,unsigned id) {
@@ -571,19 +763,16 @@ jobs:
             input_last_id=(int)id;
             input_last_value=0;
           #endif
-            /* Beetle PCE Fast may query the multitap's fifth port; this frontend exposes the one physical pad on ports 0-4. */
-            if(port>4 || (device & RETRO_DEVICE_MASK)!=RETRO_DEVICE_JOYPAD)
-              return 0;
+            if(port>4 || (device & RETRO_DEVICE_MASK)!=RETRO_DEVICE_JOYPAD) return 0;
             if(id==RETRO_DEVICE_ID_JOYPAD_MASK) {
               result=(int16_t)retro_joypad_mask();
           #if PCE_SHOW_DIAGNOSTICS
               input_mask_query_count++;
               input_last_value=(int)(uint16_t)result;
               input_active_mask |= (unsigned int)(uint16_t)result;
-              input_a_value = !!((uint16_t)result & (1u << RETRO_DEVICE_ID_JOYPAD_A));
-              input_b_value = !!((uint16_t)result & (1u << RETRO_DEVICE_ID_JOYPAD_B));
-              input_a_queries++;
-              input_b_queries++;
+              input_a_value=!!((uint16_t)result & (1u<<RETRO_DEVICE_ID_JOYPAD_A));
+              input_b_value=!!((uint16_t)result & (1u<<RETRO_DEVICE_ID_JOYPAD_B));
+              input_a_queries++; input_b_queries++;
           #endif
               return result;
             }
@@ -595,12 +784,12 @@ jobs:
               case RETRO_DEVICE_ID_JOYPAD_DOWN: result=!!(buttons_now&PAD_DOWN); break;
               case RETRO_DEVICE_ID_JOYPAD_LEFT: result=!!(buttons_now&PAD_LEFT); break;
               case RETRO_DEVICE_ID_JOYPAD_RIGHT: result=!!(buttons_now&PAD_RIGHT); break;
-              case RETRO_DEVICE_ID_JOYPAD_B: result=!!((buttons_now&PAD_CROSS) || turbo_ii_active); break;
-              case RETRO_DEVICE_ID_JOYPAD_A: result=!!((buttons_now&PAD_CIRCLE) || turbo_i_active); break;
+              case RETRO_DEVICE_ID_JOYPAD_B: result=!!((buttons_now&PAD_CROSS)||turbo_ii_active); break;
+              case RETRO_DEVICE_ID_JOYPAD_A: result=!!((buttons_now&PAD_CIRCLE)||turbo_i_active); break;
               case RETRO_DEVICE_ID_JOYPAD_START: result=!!(buttons_now&PAD_START); break;
               case RETRO_DEVICE_ID_JOYPAD_SELECT: result=!!(buttons_now&PAD_SELECT); break;
-              case RETRO_DEVICE_ID_JOYPAD_X: result=0; break; /* Square is Turbo I, not PCE IV. */
-              case RETRO_DEVICE_ID_JOYPAD_Y: result=0; break; /* Triangle is Turbo II, not PCE III. */
+              case RETRO_DEVICE_ID_JOYPAD_X: result=0; break;
+              case RETRO_DEVICE_ID_JOYPAD_Y: result=0; break;
               case RETRO_DEVICE_ID_JOYPAD_L: result=!!(buttons_now&PAD_L1); break;
               case RETRO_DEVICE_ID_JOYPAD_R: result=!!(buttons_now&PAD_R1); break;
               case RETRO_DEVICE_ID_JOYPAD_L2: result=!!(buttons_now&PAD_L2); break;
@@ -631,9 +820,8 @@ jobs:
               retro_set_audio_sample_batch(audio_many);
               retro_set_input_poll(input_poll);
               retro_set_input_state(input_state);
-              retro_init();core_initialized=1;
+              retro_init(); core_initialized=1;
             }
-            /* Expose the connected physical pad to the PCE core's five possible multitap ports. */
             { unsigned int port; for(port=0;port<5;port++) retro_set_controller_port_device(port,RETRO_DEVICE_JOYPAD); }
             retro_get_system_info(&info);
             {
@@ -645,7 +833,7 @@ jobs:
                 (void)audio_init(44100);
             }
             memset(&game,0,sizeof(game));
-            game.path=path;game.data=game_data;game.size=game_size;
+            game.path=path; game.data=game_data; game.size=game_size;
             if(!retro_load_game(&game)) {unload_game();return -104;}
             core_loaded=1;
             return 0;
@@ -710,16 +898,14 @@ jobs:
             gsKit_init_screen(gs);
             gsKit_mode_switch(gs,GS_ONESHOT);
             memset(&tex,0,sizeof(tex));
-            tex.Width=TEX_SIZE;tex.Height=TEX_SIZE;tex.PSM=GS_PSM_CT16;tex.Mem=(u32 *)pixels16;
+            tex.Width=TEX_SIZE; tex.Height=TEX_SIZE; tex.PSM=GS_PSM_CT16; tex.Mem=(u32 *)pixels16;
             tex.Vram=gsKit_vram_alloc(gs,gsKit_texture_size(TEX_SIZE,TEX_SIZE,GS_PSM_CT16),GSKIT_ALLOC_USERBUFFER);
             SifInitRpc(0);
-            /* Keep the PS2 ROM module pair used by the current frontend. */
             SifLoadModule("rom0:XSIO2MAN",0,NULL);
             SifLoadModule("rom0:XPADMAN",0,NULL);
             pad_init_result=padInit(0);
             pad_open_result=0;
-            if(pad_init_result==1)
-              pad_open_result=padPortOpen(0,0,pad_buf);
+            if(pad_init_result==1) pad_open_result=padPortOpen(0,0,pad_buf);
             pad_ready=(pad_open_result!=0);
             screen=0;
             for(;;) {
@@ -736,42 +922,57 @@ jobs:
                   status_code=usb_init();
                   if(status_code>=0) {
                     usb_progress("SCAN MASS ROOT");
-                    strcpy(folder,"mass:/");status_code=scan_dir();
+                    strcpy(folder,"mass:/"); status_code=scan_dir();
                     if(status_code<0) {
                       usb_progress("SCAN MASS0 ROOT");
-                      strcpy(folder,"mass0:/");status_code=scan_dir();
+                      strcpy(folder,"mass0:/"); status_code=scan_dir();
                     }
-                    if(status_code>=0)screen=1;
+                    if(status_code>=0) screen=1;
                   }
                 }
                 refresh_screen();
               } else if(screen==1) {
                 if(nentries>0) {
-                  if(buttons_edge&PAD_UP)selected=(selected+nentries-1)%nentries;
-                  if(buttons_edge&PAD_DOWN)selected=(selected+1)%nentries;
+                  if(buttons_edge&PAD_UP) selected=(selected+nentries-1)%nentries;
+                  if(buttons_edge&PAD_DOWN) selected=(selected+1)%nentries;
                 }
-                if(buttons_edge&PAD_CIRCLE)enter_parent();
+                if(buttons_edge&PAD_CIRCLE) enter_parent();
                 if((buttons_edge&PAD_CROSS) && nentries>0) {
                   char next[MAX_PATH];
                   int written=snprintf(next,sizeof(next),"%s%s%s",folder,
                     entries[selected].name,entries[selected].dir?"/":"");
                   if(written<0 || written>=(int)sizeof(next)) status_code=-105;
                   else if(entries[selected].dir) {
-                    strcpy(folder,next);status_code=scan_dir();
+                    strcpy(folder,next); status_code=scan_dir();
                   } else {
                     strcpy(game_path,next);
                     status_code=begin_game(game_path);
-                    if(status_code>=0)screen=2;
+                    if(status_code>=0) screen=2;
                   }
                 }
-                render_browser();refresh_screen();
+                render_browser(); refresh_screen();
+              } else if(screen==3) {
+                if(buttons_edge&PAD_UP) state_menu_selected=(state_menu_selected+11)%12;
+                if(buttons_edge&PAD_DOWN) state_menu_selected=(state_menu_selected+1)%12;
+                if(buttons_edge&PAD_CIRCLE) {
+                  screen=2; buttons_prev=buttons_now; buttons_edge=0;
+                } else if(buttons_edge&PAD_CROSS) {
+                  state_menu_activate();
+                }
+                render_state_menu(); refresh_screen();
+                if(state_message_frames>0) state_message_frames--;
               } else {
                 if((buttons_now&(PAD_L1|PAD_R1|PAD_START))==(PAD_L1|PAD_R1|PAD_START)) {
-                  unload_game();screen=1;
+                  unload_game(); screen=1;
                   buttons_prev=buttons_now;
                   continue;
                 }
-                /* Debug-only counters are omitted from the performance build. */
+                if((buttons_now&(PAD_L1|PAD_R1|PAD_SELECT))==(PAD_L1|PAD_R1|PAD_SELECT)) {
+                  screen=3; state_menu_selected=0;
+                  state_set_message("SELECT SAVE OR LOAD SLOT");
+                  buttons_prev=buttons_now; buttons_edge=0;
+                  continue;
+                }
           #if PCE_SHOW_DIAGNOSTICS
                 input_active_mask=0;
                 input_query_mask=0;
@@ -787,13 +988,16 @@ jobs:
                 input_a_value=0;
                 input_b_value=0;
           #endif
-                /* Reset the frame guard and poll input explicitly before running
-                   the core. This fixes POLL=0 while input_state is queried. */
                 turbo_updated_this_frame=0;
                 video_frame_updated=0;
                 input_poll();
                 retro_run();
-                draw_game();refresh_screen();
+                draw_game();
+                if(state_message_frames>0 && state_message[0]) {
+                  label(12,430,1,state_message,GS_SETREG_RGBAQ(50,210,175,0x80,0));
+                  state_message_frames--;
+                }
+                refresh_screen();
               }
             }
             return 0;
@@ -803,7 +1007,6 @@ jobs:
           EE_BIN = PCE-Fast-Only-PS2.ELF
           EE_OBJS = pce_only.o usbd.o usbhdfsd.o iomanx.o filexio.o audsrv.o $(PCE_OPTIONAL_OBJS)
           EE_CFLAGS += -O3 -G0 -Wall -fomit-frame-pointer -funroll-loops -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ -include $(PS2_NEWLIB_SYS_TYPES)
-          EE_INCS += -I$(GSKIT)/include -I$(LIBRETRO_INC) -I$(PCE_AUDSRV_INC)
           EE_LDFLAGS += -L$(GSKIT)/lib -L$(PS2SDK)/ports/lib
           EE_LIBS += $(PCE_RAW_LIB) $(PCE_AUDSRV_LIB) $(PCE_VORBIS_LIBS) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
           all: $(EE_BIN)
@@ -848,8 +1051,6 @@ jobs:
         shell: sh
         run: |
           set -eu
-          # IMPORTANT: host Alpine zlib is x86_64 and cannot link into a PS2 ELF.
-          # Locate the MIPS-targeted static archive installed by ps2sdk-ports.
           PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
           ZLIB_LIB=""
           for candidate in \
@@ -898,8 +1099,6 @@ jobs:
         shell: sh
         run: |
           set -eu
-          # Cartridge .pce games do not use audioreader Ogg file APIs.
-          # These missing references come from CD track decoding only.
           ROOT="${PS2DEV:-/usr/local/ps2dev}"
           VF="$(find "$ROOT" -type f -name libvorbisfile.a -print -quit 2>/dev/null || true)"
           V="$(find "$ROOT" -type f -name libvorbis.a -print -quit 2>/dev/null || true)"
@@ -913,13 +1112,7 @@ jobs:
             : > pce-vorbis-extra-objects.txt
             echo 'vorbisfile/native' > pce-vorbis-mode.txt
           else
-            # A nonfunctional fake decoder is never advertised as CD support.
-            # Explicit fail-closed stubs resolve the 5 linker references and
-            # preserve real cartridge emulation, without faking decoded data.
             cat > pce-only/vorbis_no_cd.c <<'PCE_NO_CD_VORBIS_C'
-          /* Cartridge-only experimental build: Ogg CD audio deliberately disabled.
-             These entrypoints are referenced by Mednafen's CD audioreader but
-             must never be used for .pce cartridge games. Always report failure. */
           #include <stddef.h>
           int ov_open_callbacks(void *src, void *vf, const char *initial,
                                 long ibytes, void *callbacks) {
@@ -1062,7 +1255,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2.4-Turbo-I-II-Debug-Fix
+          name: PCE-Fast-PS2-V12.2.4-Save-Load-State-5-Slots
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
