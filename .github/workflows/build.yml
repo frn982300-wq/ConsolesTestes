@@ -1,4 +1,4 @@
-name: PCE Fast PS2 V12.2.4 - Joypad and PS2SDK Types Fix
+name: PCE Fast PS2 V12.2.4 - GS Native Color Fix Test
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build PCE Fast V12.2.4 ELF and publish artifacts
+    name: Build PCE Fast V12.2.4 Color Fix ELF and publish artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -22,7 +22,7 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: V12.2.4 joypad-mask support, ports 0-4, explicit PS2 newlib types, and timeval guard compatibility\n' >> artifact-staging/workflow-status.txt
+          printf 'Variant: V12.2.4 baseline; decode Aurora GS-native A1B5G5R5 pixels correctly; preserve joypad and USB/exFAT integration\n' >> artifact-staging/workflow-status.txt
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -43,6 +43,19 @@ jobs:
           test -s aurora/tools/Makefile.beetle-pce-fast-ps2
           test -s aurora/src/third_party/beetle-pce-fast/libretro.c
           git -C aurora rev-parse HEAD > aurora-revision.txt
+
+      - name: Verify Aurora GS-native color layout
+        shell: sh
+        run: |
+          set -eu
+          VIDEO_HEADER=aurora/src/third_party/beetle-pce-fast/mednafen/video.h
+          CORE_MAKEFILE=aurora/tools/Makefile.beetle-pce-fast-ps2
+          test -s "$VIDEO_HEADER" || { echo 'PCE video.h not found'; exit 1; }
+          grep -q 'AURORA_PS2_PCE_FAST' "$VIDEO_HEADER" || { echo 'Expected Aurora PS2 color path not found'; exit 1; }
+          grep -q 'RED_SHIFT   0' "$VIDEO_HEADER" || { echo 'Expected GS-native red bit layout not found'; exit 1; }
+          grep -q 'BLUE_SHIFT  10' "$VIDEO_HEADER" || { echo 'Expected GS-native blue bit layout not found'; exit 1; }
+          grep -q -- '-DAURORA_PS2_PCE_FAST=1' "$CORE_MAKEFILE" || { echo 'Aurora PS2 core define missing'; exit 1; }
+          echo 'Verified: core palette uses GS-native A1B5G5R5 (R bits 0-4, G 5-9, B 10-14).'
 
       - name: Build ONLY the original PC Engine core archive
         shell: sh
@@ -435,8 +448,13 @@ jobs:
                   unsigned p=((const uint32_t *)row)[x];
                   r=(p>>16)&255u; g=(p>>8)&255u; b=p&255u;
                 } else if(pixel_format==RETRO_PIXEL_FORMAT_RGB565) {
+                  /* The Aurora PS2 core overrides normal RGB565 packing when
+                   * AURORA_PS2_PCE_FAST is defined. Its actual 16-bit pixels are
+                   * GS-native A1B5G5R5: R[4:0], G[9:5], B[14:10]. The core still
+                   * requests RETRO_PIXEL_FORMAT_RGB565, so treating these words
+                   * as standard RGB565 causes the red/pink color cast. */
                   unsigned p=((const uint16_t *)row)[x];
-                  r=lut5[(p>>11)&31u]; g=lut6[(p>>5)&63u]; b=lut5[p&31u];
+                  r=lut5[p&31u]; g=lut5[(p>>5)&31u]; b=lut5[(p>>10)&31u];
                 } else {
                   /* Libretro 0RGB1555: R[14:10], G[9:5], B[4:0]. */
                   unsigned p=((const uint16_t *)row)[x];
@@ -592,6 +610,8 @@ jobs:
               label(6,76,1,diag,aqua);
               snprintf(diag,sizeof(diag),"POLL %u CALL %u",input_poll_count,input_state_count);
               label(6,86,1,diag,aqua);
+              snprintf(diag,sizeof(diag),"PF %d GS-5551",pixel_format);
+              label(6,96,1,diag,aqua);
             } else {
               title_screen("WAITING FOR VIDEO");
             }
@@ -952,7 +972,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2.4-Joypad-PS2-Newlib-Types
+          name: PCE-Fast-PS2-V12.2.4-Color-Fix-Test
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
