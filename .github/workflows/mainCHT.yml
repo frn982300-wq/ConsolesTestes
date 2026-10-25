@@ -1,5 +1,8 @@
 name: PCE Fast PS2 V12.2.4 - Save Load State + Splatterhouse Cheats
-on:
+'on':
+  push:
+    branches:
+      - main
   workflow_dispatch:
 permissions:
   contents: read
