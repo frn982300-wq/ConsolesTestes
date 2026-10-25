@@ -1,14 +1,11 @@
-name: PCE Fast PS2 V12.2.4 - Save State Load State (5 Slots)
-
+name: PCE Fast PS2 V12.2.4 - Save Load State + Splatterhouse Cheats
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   build:
-    name: Build PCE Fast V12.2.4 Save/Load State + Turbo I II ELF and publish artifacts
+    name: Build PCE Fast V12.2.4 Save/Load + Turbo + Splatterhouse Cheats ELF
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
@@ -20,18 +17,15 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant: preserve confirmed speed/color/exFAT/Turbo baseline; add 5 per-game Save State and Load State slots using Libretro serialization and USB exFAT\n' >> artifact-staging/workflow-status.txt
-          printf 'In-game menu: L1+R1+SELECT; D-pad Up/Down; Cross=confirm; Circle=back. State files: mass:/PCEFAST/STATES/ (or mass0:/ if that alias loaded the ROM).\n' >> artifact-staging/workflow-status.txt
-
+          printf 'Variant: preserve confirmed speed/color/exFAT/Turbo/SaveLoad baseline; add 14 Splatterhouse cheat options. All cheats start OFF.\n' >> artifact-staging/workflow-status.txt
+          printf 'Menu: L1+R1+SELECT opens Save/Load; choose CHEAT MENU; D-pad moves; Cross toggles; Circle backs. Cheats only activate when ROM path contains Splatterhouse.\n' >> artifact-staging/workflow-status.txt
       - name: Checkout workflow repository
         uses: actions/checkout@v4
-
       - name: Install tools
         shell: sh
         run: |
           set -eu
           apk add --no-cache git make python3 build-base unzip binutils
-
       - name: Fetch tested PS2 PCE Fast integration
         shell: sh
         run: |
@@ -42,7 +36,6 @@ jobs:
           test -s aurora/tools/Makefile.beetle-pce-fast-ps2
           test -s aurora/src/third_party/beetle-pce-fast/libretro.c
           git -C aurora rev-parse HEAD > aurora-revision.txt
-
       - name: Verify Aurora GS-native color layout
         shell: sh
         run: |
@@ -57,7 +50,6 @@ jobs:
           grep -q '0x8000u' "$VIDEO_HEADER" || { echo 'Expected opaque alpha bit for GS CT16 not found'; exit 1; }
           grep -q -- '-DAURORA_PS2_PCE_FAST=1' "$CORE_MAKEFILE" || { echo 'Aurora PS2 core define missing'; exit 1; }
           echo 'Verified: source pixels are opaque GS-native A1B5G5R5; direct CT16 upload path is valid.'
-
       - name: Build ONLY the original PC Engine core archive
         shell: sh
         run: |
@@ -79,15 +71,14 @@ jobs:
             echo 'Raw archive does not export the expected Libretro API.'
             exit 1
           }
-          for symbol in retro_serialize_size retro_serialize retro_unserialize; do
+          for symbol in retro_serialize_size retro_serialize retro_unserialize retro_cheat_reset retro_cheat_set; do
             grep -Eq "[[:space:]]${symbol}$" pce-symbols.txt || {
-              echo "Required Save State API missing from core: ${symbol}"
+              echo "Required Libretro API missing from core: ${symbol}"
               exit 1
             }
           done
-          echo 'Verified: retro_run and all three Libretro Save/Load State exports.'
+          echo 'Verified: retro_run, Save/Load State APIs, and cheat reset/set APIs.'
           echo 'Save State test: open menu with L1+R1+SELECT; D-pad moves; Cross confirms; Circle returns. Test all five slots on USB exFAT.'
-
       - name: Extract the tested V10/V11 exFAT driver pair
         shell: sh
         run: |
@@ -109,905 +100,187 @@ jobs:
           test -s "$PS2SDK/iop/irx/iomanX.irx"
           test -s "$PS2SDK/iop/irx/fileXio.irx"
           echo 'Extracted tested V10/V11 exFAT pair: usbd.irx + usbhdfsd.irx.'
-
       - name: Generate PS2-only Libretro frontend
         shell: sh
         run: |
           set -eu
           mkdir -p pce-only
-          cat > pce-only/pce_only.c <<'PCE_FRONTEND_C'
-          /*
-           * PCE Fast PS2 - experimental single-core Libretro frontend.
-           * Based on the Beetle PCE Fast libretro core used by SNESticle Aurora.
-           * This frontend is new; the core is built from its original source.
-           * No ROM or firmware bundled. Uses the previously tested V10/V11 exFAT driver pair.
-           * Native PS2 libvorbisfile optional; fallback supports cartridges only.
-           */
-          #include <gsKit.h>
-          #include <dmaKit.h>
-          #include <libpad.h>
-          #include <sifrpc.h>
-          #include <loadfile.h>
-          #include <sbv_patches.h>
-          #include <iopheap.h>
-          #include <fileXio_rpc.h>
-          #include <io_common.h>
-          #include <iox_stat.h>
-          #include <libretro.h>
-          #include <audsrv.h>
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include <ctype.h>
-          #include <stdint.h>
-          extern int snprintf(char *str, size_t size, const char *format, ...);
-
-          #define MAX_FILES 128
-          #define MAX_PATH 512
-          #define ROM_LIMIT (8u * 1024u * 1024u)
-          #define TEX_SIZE 512
-          #define PCE_SHOW_DIAGNOSTICS 1
-
-          extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[], audsrv_irx[];
-          extern unsigned int size_usbd_irx, size_usbhdfsd_irx, size_iomanx_irx, size_filexio_irx, size_audsrv_irx;
-
-          typedef struct { char name[256]; int dir; } Entry;
-          static Entry entries[MAX_FILES];
-          static int nentries, selected, screen, status_code;
-          static char folder[MAX_PATH] = "mass:/";
-          static char game_path[MAX_PATH];
-          static unsigned char *game_data;
-          static size_t game_size;
-          static char pad_buf[256] __attribute__((aligned(64)));
-          static struct padButtonStatus pad_info;
-          static unsigned int buttons_now, buttons_prev, buttons_edge;
-          #define PCE_TURBO_PERIOD_FRAMES 4u
-          #define PCE_TURBO_ON_FRAMES 2u
-          static unsigned int turbo_i_counter, turbo_ii_counter;
-          static int turbo_i_active, turbo_ii_active;
-          static int turbo_updated_this_frame;
-          static iox_dirent_t dirent_buf __attribute__((aligned(64)));
-          static iox_stat_t stat_buf __attribute__((aligned(64)));
-          static unsigned char readbuf[16384] __attribute__((aligned(64)));
-          static uint16_t pixels16[TEX_SIZE * TEX_SIZE] __attribute__((aligned(64)));
-          static GSTEXTURE tex;
-          static GSGLOBAL *gs;
-          static int video_received, video_frame_updated, pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
-          static unsigned frame_w = 256, frame_h = 224;
-          static int core_initialized, core_loaded;
-          static int usb_initialized, iop_prepared;
-          static int pad_ready;
-          static int pad_read_ok, pad_state_value = -1, pad_read_len;
-          static unsigned int pad_raw_buttons = 0xffffu;
-          static int pad_init_result, pad_open_result;
-          #if PCE_SHOW_DIAGNOSTICS
-          static unsigned int input_active_mask, input_query_mask;
-          static unsigned int input_mask_query_count;
-          static unsigned int input_poll_count, input_state_count;
-          static int input_last_port = -1, input_last_device = -1;
-          static int input_last_id = -1, input_last_value;
-          static unsigned int input_a_queries, input_b_queries;
-          static int input_a_value, input_b_value;
-          #endif
-          static int audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
-          static unsigned audio_rate = 44100;
-
-          #define PCE_STATE_SLOTS 5
-          #define PCE_STATE_MAX_BYTES (16u * 1024u * 1024u)
-          #define PCE_STATE_VERSION 1u
-          typedef struct {
-            char magic[8];
-            uint32_t version;
-            uint32_t game_hash;
-            uint32_t payload_size;
-            uint32_t payload_hash;
-            uint32_t turbo_i_counter;
-            uint32_t turbo_ii_counter;
-          } PCEStateHeader;
-          static int state_menu_selected = 0;
-          static char state_message[64] = "";
-          static int state_message_frames;
-
-          static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/:._()";
-          static const unsigned long long glyphs[] = {
-            0x4631fc62eULL,0x3e317c62fULL,0x78210843eULL,0x3e318c62fULL,0x7c217843fULL,
-            0x04217843fULL,0x3a31e843eULL,0x4631fc631ULL,0x7c842109fULL,0x19294211cULL,
-            0x452519531ULL,0x7c2108421ULL,0x4631ad771ULL,0x4631cd671ULL,0x3a318c62eULL,
-            0x04217c62fULL,0x59358c62eULL,0x45257c62fULL,0x3e107043eULL,0x10842109fULL,
-            0x3a318c631ULL,0x11518c631ULL,0x4775ac631ULL,0x462a22a31ULL,0x108422a31ULL,
-            0x7c222221fULL,0x3a33ae62eULL,0x3884210c4ULL,0x7c444422eULL,0x3e107420fULL,
-            0x211f4a988ULL,0x3e107843fULL,0x3a317842eULL,0x08422221fULL,0x3a317462eULL,
-            0x3a10f462eULL,0x0000f8000ULL,0x042222210ULL,0x008401080ULL,0x18c000000ULL,
-            0x000000000ULL,0x000000000ULL,0x000000000ULL,0x000000000ULL
-          };
-          static void label(int x,int y,int scale,const char *s,uint64_t color) {
-            int i,r,c,j;
-            for(i=0;s[i];i++) {
-              char ch=(char)toupper((unsigned char)s[i]);
-              unsigned long long bits=0;
-              for(j=0;chars[j];j++) if(chars[j]==ch) {bits=glyphs[j];break;}
-              for(r=0;r<7;r++) for(c=0;c<5;c++) if(bits&(1ULL << (r*5+c))) {
-                float xx=(float)(x+(i*6+c)*scale), yy=(float)(y+r*scale);
-                gsKit_prim_sprite(gs,xx,yy,xx+scale,yy+scale,1,color);
-              }
-            }
-          }
-          static void title_screen(const char *subtitle) {
-            uint64_t bg=GS_SETREG_RGBAQ(12,20,35,0x80,0);
-            uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
-            uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
-            gsKit_clear(gs,bg);
-            label(45,48,3,"PCE FAST PS2",white);
-            label(45,99,2,subtitle,aqua);
-          }
-          static void refresh_screen(void) { gsKit_queue_exec(gs); gsKit_sync_flip(gs); }
-          static void pad_scan(void) {
-            int s, n;
-            buttons_prev=buttons_now;
-            pad_read_ok=0;
-            pad_read_len=0;
-            if(!pad_ready) {
-              pad_state_value=-1; pad_raw_buttons=0xffffu;
-              buttons_now=0; buttons_edge=0; return;
-            }
-            s=padGetState(0,0);
-            pad_state_value=s;
-            if(s!=PAD_STATE_STABLE && s!=PAD_STATE_FINDCTP1) {
-              pad_raw_buttons=0xffffu;
-              buttons_now=0; buttons_edge=0; return;
-            }
-            n=(int)padRead(0,0,&pad_info);
-            pad_read_len=n;
-            if(n<=0) {
-              pad_raw_buttons=0xffffu;
-              buttons_now=0; buttons_edge=0; return;
-            }
-            pad_read_ok=1;
-            pad_raw_buttons=(unsigned int)pad_info.btns & 0xffffu;
-            buttons_now=(~pad_raw_buttons) & 0xffffu;
-            buttons_edge=buttons_now & ~buttons_prev;
-          }
-          static int load_mod(void *address,unsigned int len) {
-            int result=0, id=SifExecModuleBuffer(address,len,0,NULL,&result);
-            return (id<0)?id:((result<0)?result:0);
-          }
-          static void usb_progress(const char *stage) {
-            title_screen("V12 EXFAT AUDIO");
-            label(52,210,2,stage,GS_SETREG_RGBAQ(50,210,175,0x80,0));
-            refresh_screen();
-          }
-          static int usb_init(void) {
-            int r;
-            if(usb_initialized)return 0;
-            usb_progress("INIT SIF / IOP");
-            SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
-            usb_progress("LOAD IOMANX");
-            r=load_mod(iomanx_irx,size_iomanx_irx); if(r<0)return r;
-            usb_progress("LOAD FILEXIO");
-            r=load_mod(filexio_irx,size_filexio_irx); if(r<0)return r;
-            usb_progress("INIT FILEXIO");
-            r=fileXioInit(); if(r<0)return r;
-            usb_progress("LOAD EXFAT USBD");
-            r=load_mod(usbd_irx,size_usbd_irx); if(r<0)return r;
-            usb_progress("LOAD EXFAT HDFSD");
-            r=load_mod(usbhdfsd_irx,size_usbhdfsd_irx); if(r<0)return r;
-            usb_initialized=1;
-            usb_progress("EXFAT DRIVERS READY");
-            return 0;
-          }
-          static int audio_init(unsigned requested_rate) {
-            int r;
-            struct audsrv_fmt_t fmt;
-            if(audio_ready) return 0;
-            if(!iop_prepared) {
-              SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
-            }
-            if(!audio_module_loaded) {
-              (void)SifLoadModule("rom0:LIBSD",0,NULL);
-              r=load_mod(audsrv_irx,size_audsrv_irx);
-              if(r<0) { audio_error=r; return r; }
-              audio_module_loaded=1;
-            }
-            if(!audio_rpc_ready) {
-              r=audsrv_init();
-              if(r<0) { audio_error=r; return r; }
-              audio_rpc_ready=1;
-            }
-            fmt.freq=(int)(requested_rate ? requested_rate : 44100);
-            fmt.bits=16; fmt.channels=2;
-            r=audsrv_set_format(&fmt);
-            if(r<0 && fmt.freq!=44100) { fmt.freq=44100; r=audsrv_set_format(&fmt); }
-            if(r<0 && fmt.freq!=22050) { fmt.freq=22050; r=audsrv_set_format(&fmt); }
-            if(r<0) { audio_error=r; return r; }
-            r=audsrv_set_volume(90);
-            if(r<0) { audio_error=r; return r; }
-            audio_rate=(unsigned)fmt.freq;
-            audio_ready=1; audio_error=0;
-            return 0;
-          }
-          static unsigned next_pow2(unsigned v) {
-            unsigned n=1;
-            while(n<v && n<TEX_SIZE)n<<=1;
-            return n;
-          }
-          static int is_pce(const char *name) {
-            const char *dot=strrchr(name,'.');
-            return dot && dot[1] && dot[2] && dot[3] && !dot[4] &&
-              tolower((unsigned char)dot[1])=='p' &&
-              tolower((unsigned char)dot[2])=='c' &&
-              tolower((unsigned char)dot[3])=='e';
-          }
-          static int cmp_entry(const void *pa,const void *pb) {
-            const Entry *a=(const Entry *)pa,*b=(const Entry *)pb;
-            if(a->dir != b->dir) return b->dir-a->dir;
-            {
-              int i;
-              for(i=0;i<256;i++) {
-                int ca=tolower((unsigned char)a->name[i]);
-                int cb=tolower((unsigned char)b->name[i]);
-                if(ca!=cb)return ca-cb;
-                if(!ca)return 0;
-              }
-              return 0;
-            }
-          }
-          static int scan_dir(void) {
-            int d=fileXioDopen(folder),r;
-            nentries=0; selected=0;
-            if(d<0) return d;
-            for(;;) {
-              memset(&dirent_buf,0,sizeof(dirent_buf));
-              r=fileXioDread(d,&dirent_buf);
-              if(r<=0)break;
-              dirent_buf.name[sizeof(dirent_buf.name)-1]=0;
-              if(!strcmp(dirent_buf.name,".")||!strcmp(dirent_buf.name,".."))continue;
-              if(!FIO_S_ISDIR(dirent_buf.stat.mode) && !is_pce(dirent_buf.name))continue;
-              if(nentries>=MAX_FILES)continue;
-              strncpy(entries[nentries].name,dirent_buf.name,sizeof(entries[0].name)-1);
-              entries[nentries].name[sizeof(entries[0].name)-1]=0;
-              entries[nentries].dir=FIO_S_ISDIR(dirent_buf.stat.mode)?1:0;
-              ++nentries;
-            }
-            fileXioDclose(d);
-            qsort(entries,nentries,sizeof(entries[0]),cmp_entry);
-            return r<0?r:0;
-          }
-          static void enter_parent(void) {
-            size_t n=strlen(folder), root=!strncmp(folder,"mass0:/",7)?7:6;
-            if(n<=root) {screen=0;return;}
-            if(folder[n-1]=='/')--n;
-            while(n>root&&folder[n-1]!='/')--n;
-            folder[n]=0;
-            status_code=scan_dir();
-          }
-          static void render_browser(void) {
-            int first=selected-5,i;
-            uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
-            uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
-            char tmp[40],msg[80];
-            title_screen("USB EXFAT BROWSER");
-            strncpy(tmp,folder,sizeof(tmp)-1);tmp[sizeof(tmp)-1]=0;
-            label(45,145,2,tmp,aqua);
-            if(first<0)first=0;
-            if(first+9>nentries) first=nentries-9;
-            if(first<0)first=0;
-            for(i=first;i<nentries && i<first+9;i++) {
-              snprintf(msg,sizeof(msg),"%c %.*s",entries[i].dir?'D':'R',26,entries[i].name);
-              label(50,184+(i-first)*25,2,msg,i==selected?aqua:white);
-            }
-            if(nentries==0)label(50,210,2,"NO PCE FILES",white);
-            label(44,415,2,"UP DOWN X OPEN O BACK",aqua);
-          }
-          static void unload_game(void) {
-            video_frame_updated=0;
-            if(core_loaded) {retro_unload_game();core_loaded=0;}
-            if(game_data) {free(game_data);game_data=NULL;}
-            game_size=0;
-            video_received=0;
-          }
-          static int read_full_game(const char *path) {
-            int fd,n,seek=0;
-            size_t off=0, sz;
-            memset(&stat_buf,0,sizeof(stat_buf));
-            n=fileXioGetStat(path,&stat_buf);
-            if(n<0)return n;
-            if(stat_buf.hisize || !stat_buf.size || stat_buf.size>ROM_LIMIT)return -100;
-            sz=(size_t)stat_buf.size;
-            game_data=(unsigned char *)malloc(sz);
-            if(!game_data)return -101;
-            fd=fileXioOpen(path,FIO_O_RDONLY);
-            if(fd<0){unload_game();return fd;}
-            seek=fileXioLseek(fd,0,FIO_SEEK_SET);
-            if(seek!=0){fileXioClose(fd);unload_game();return -102;}
-            while(off<sz) {
-              int want=(int)(sz-off);
-              if(want>(int)sizeof(readbuf))want=(int)sizeof(readbuf);
-              n=fileXioRead(fd,readbuf,want);
-              if(n<=0 || n>want) {fileXioClose(fd);unload_game();return n<0?n:-103;}
-              memcpy(game_data+off,readbuf,(size_t)n);
-              off+=(size_t)n;
-            }
-            n=fileXioClose(fd);
-            if(n<0){unload_game();return n;}
-            game_size=sz;
-            return 0;
-          }
-          static uint32_t state_hash_bytes(const unsigned char *data, size_t size) {
-            uint32_t h = 2166136261u;
-            size_t i;
-            for(i=0;i<size;i++) { h ^= data[i]; h *= 16777619u; }
-            return h;
-          }
-          static uint32_t state_game_hash(void) {
-            const char *p = game_path;
-            const char *colon = strchr(game_path, ':');
-            uint32_t h = 2166136261u;
-            if(colon && colon[1]=='/') p = colon + 2;
-            while(*p) {
-              unsigned char c = (unsigned char)tolower((unsigned char)*p++);
-              h ^= c; h *= 16777619u;
-            }
-            return h;
-          }
-          static void state_set_message(const char *message) {
-            if(!message) message = "";
-            strncpy(state_message, message, sizeof(state_message)-1);
-            state_message[sizeof(state_message)-1] = 0;
-            state_message_frames = state_message[0] ? 180 : 0;
-          }
-          static int state_make_paths(int slot, char *dir1, size_t dir1_cap,
-                                      char *dir2, size_t dir2_cap,
-                                      char *path, size_t path_cap) {
-            const char *root;
-            const char *base;
-            const char *dot;
-            char slug[64];
-            size_t j=0;
-            int n;
-            if(slot<0 || slot>=PCE_STATE_SLOTS || !game_path[0]) return -1;
-            root = !strncmp(game_path,"mass0:/",7) ? "mass0:/" : "mass:/";
-            n=snprintf(dir1,dir1_cap,"%sPCEFAST",root);
-            if(n<0 || (size_t)n>=dir1_cap) return -2;
-            n=snprintf(dir2,dir2_cap,"%sPCEFAST/STATES",root);
-            if(n<0 || (size_t)n>=dir2_cap) return -3;
-            base=strrchr(game_path,'/'); base=base?base+1:game_path;
-            dot=strrchr(base,'.');
-            while(*base && base!=dot && j<sizeof(slug)-1) {
-              unsigned char c=(unsigned char)*base++;
-              if(isalnum(c)) slug[j++]=(char)toupper(c);
-              else if(j && slug[j-1]!='_') slug[j++]='_';
-            }
-            while(j && slug[j-1]=='_') --j;
-            if(!j) { slug[0]='G'; slug[1]='A'; slug[2]='M'; slug[3]='E'; j=4; }
-            slug[j]=0;
-            n=snprintf(path,path_cap,"%sPCEFAST/STATES/%s_%08X.slot%d",
-                       root,slug,(unsigned int)state_game_hash(),slot+1);
-            if(n<0 || (size_t)n>=path_cap) return -4;
-            return 0;
-          }
-          static int state_ensure_directory(const char *path) {
-            int d=fileXioDopen(path);
-            if(d>=0) { fileXioDclose(d); return 0; }
-            (void)fileXioMkdir(path,0777);
-            d=fileXioDopen(path);
-            if(d<0) return d;
-            fileXioDclose(d);
-            return 0;
-          }
-          static int state_ensure_directories(const char *dir1,const char *dir2) {
-            if(state_ensure_directory(dir1)<0) return -1;
-            if(state_ensure_directory(dir2)<0) return -2;
-            return 0;
-          }
-          static int state_write_exact(int fd,const void *buffer,size_t size) {
-            const unsigned char *p=(const unsigned char *)buffer;
-            while(size) {
-              int chunk=(size>(size_t)16384)?16384:(int)size;
-              int n=fileXioWrite(fd,(void *)p,chunk);
-              if(n<=0 || n>chunk) return -1;
-              p+=(size_t)n; size-=(size_t)n;
-            }
-            return 0;
-          }
-          static int state_read_exact(int fd,void *buffer,size_t size) {
-            unsigned char *p=(unsigned char *)buffer;
-            while(size) {
-              int chunk=(size>(size_t)16384)?16384:(int)size;
-              int n=fileXioRead(fd,p,chunk);
-              if(n<=0 || n>chunk) return -1;
-              p+=(size_t)n; size-=(size_t)n;
-            }
-            return 0;
-          }
-          static int state_save_slot(int slot) {
-            char dir1[MAX_PATH],dir2[MAX_PATH],path[MAX_PATH],tmp[MAX_PATH];
-            size_t size;
-            unsigned char *payload;
-            PCEStateHeader header;
-            int fd,r;
-            if(!core_loaded) { state_set_message("NO GAME LOADED"); return -1; }
-            size=retro_serialize_size();
-            if(!size || size>PCE_STATE_MAX_BYTES) { state_set_message("SAVE STATE UNSUPPORTED"); return -2; }
-            payload=(unsigned char *)malloc(size);
-            if(!payload) { state_set_message("SAVE STATE OUT OF MEMORY"); return -3; }
-            if(!retro_serialize(payload,size)) {
-              free(payload); state_set_message("SAVE STATE FAILED"); return -4;
-            }
-            r=state_make_paths(slot,dir1,sizeof(dir1),dir2,sizeof(dir2),path,sizeof(path));
-            if(r<0 || state_ensure_directories(dir1,dir2)<0) {
-              free(payload); state_set_message("STATE USB DIRECTORY ERROR"); return -5;
-            }
-            if(snprintf(tmp,sizeof(tmp),"%s.tmp",path)<0 || strlen(path)+4>=sizeof(tmp)) {
-              free(payload); state_set_message("STATE PATH TOO LONG"); return -6;
-            }
-            memset(&header,0,sizeof(header));
-            memcpy(header.magic,"PCESTATE",8);
-            header.version=PCE_STATE_VERSION;
-            header.game_hash=state_game_hash();
-            header.payload_size=(uint32_t)size;
-            header.payload_hash=state_hash_bytes(payload,size);
-            header.turbo_i_counter=turbo_i_counter;
-            header.turbo_ii_counter=turbo_ii_counter;
-            fd=fileXioOpen(tmp,FIO_O_WRONLY|FIO_O_CREAT|FIO_O_TRUNC);
-            if(fd<0) { free(payload); state_set_message("STATE FILE OPEN ERROR"); return -7; }
-            r=state_write_exact(fd,&header,sizeof(header));
-            if(r==0) r=state_write_exact(fd,payload,size);
-            if(fileXioClose(fd)<0) r=-1;
-            free(payload);
-            if(r<0) { fileXioRemove(tmp); state_set_message("STATE WRITE ERROR"); return -8; }
-            (void)fileXioRemove(path);
-            if(fileXioRename(tmp,path)<0) {
-              fileXioRemove(tmp); state_set_message("STATE RENAME ERROR"); return -9;
-            }
-            state_set_message("STATE SAVED");
-            return 0;
-          }
-          static int state_load_slot(int slot) {
-            char dir1[MAX_PATH],dir2[MAX_PATH],path[MAX_PATH];
-            PCEStateHeader header;
-            size_t expected;
-            unsigned char *payload;
-            int fd,r;
-            if(!core_loaded) { state_set_message("NO GAME LOADED"); return -1; }
-            expected=retro_serialize_size();
-            if(!expected || expected>PCE_STATE_MAX_BYTES) { state_set_message("LOAD STATE UNSUPPORTED"); return -2; }
-            r=state_make_paths(slot,dir1,sizeof(dir1),dir2,sizeof(dir2),path,sizeof(path));
-            if(r<0) { state_set_message("STATE PATH ERROR"); return -3; }
-            memset(&stat_buf,0,sizeof(stat_buf));
-            if(fileXioGetStat(path,&stat_buf)<0 || stat_buf.hisize || stat_buf.size<sizeof(header)) {
-              state_set_message("STATE SLOT EMPTY"); return -4;
-            }
-            fd=fileXioOpen(path,FIO_O_RDONLY);
-            if(fd<0) { state_set_message("STATE OPEN ERROR"); return -5; }
-            r=state_read_exact(fd,&header,sizeof(header));
-            if(r<0) { fileXioClose(fd); state_set_message("STATE HEADER ERROR"); return -6; }
-            if(memcmp(header.magic,"PCESTATE",8)!=0 || header.version!=PCE_STATE_VERSION ||
-               header.game_hash!=state_game_hash() || !header.payload_size ||
-               header.payload_size>PCE_STATE_MAX_BYTES || header.payload_size!=expected ||
-               (uint64_t)sizeof(header)+(uint64_t)header.payload_size!=(uint64_t)stat_buf.size) {
-              fileXioClose(fd); state_set_message("STATE INCOMPATIBLE"); return -7;
-            }
-            payload=(unsigned char *)malloc((size_t)header.payload_size);
-            if(!payload) { fileXioClose(fd); state_set_message("LOAD STATE OUT OF MEMORY"); return -8; }
-            r=state_read_exact(fd,payload,(size_t)header.payload_size);
-            if(fileXioClose(fd)<0) r=-1;
-            if(r<0 || state_hash_bytes(payload,(size_t)header.payload_size)!=header.payload_hash) {
-              free(payload); state_set_message("STATE CORRUPT"); return -9;
-            }
-            if(!retro_unserialize(payload,(size_t)header.payload_size)) {
-              free(payload); state_set_message("STATE RESTORE FAILED"); return -10;
-            }
-            free(payload);
-            turbo_i_counter=header.turbo_i_counter;
-            turbo_ii_counter=header.turbo_ii_counter;
-            turbo_i_active=0; turbo_ii_active=0; turbo_updated_this_frame=0;
-            video_received=0; video_frame_updated=0;
-            state_set_message("STATE LOADED");
-            return 0;
-          }
-          static void render_state_menu(void) {
-            int i;
-            char item[40];
-            uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
-            uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
-            title_screen("SAVE / LOAD STATE");
-            label(30,119,1,"UP DOWN X SELECT O BACK",aqua);
-            for(i=0;i<12;i++) {
-              if(i<PCE_STATE_SLOTS) snprintf(item,sizeof(item),"SAVE SLOT %d",i+1);
-              else if(i<PCE_STATE_SLOTS*2) snprintf(item,sizeof(item),"LOAD SLOT %d",i-PCE_STATE_SLOTS+1);
-              else if(i==10) snprintf(item,sizeof(item),"RESUME GAME");
-              else snprintf(item,sizeof(item),"EXIT TO BROWSER");
-              label(54,142+i*21,2,item,i==state_menu_selected?aqua:white);
-            }
-            if(state_message_frames>0 && state_message[0]) label(20,408,1,state_message,aqua);
-          }
-          static void state_menu_activate(void) {
-            if(state_menu_selected<PCE_STATE_SLOTS) {
-              (void)state_save_slot(state_menu_selected);
-            } else if(state_menu_selected<PCE_STATE_SLOTS*2) {
-              (void)state_load_slot(state_menu_selected-PCE_STATE_SLOTS);
-            } else if(state_menu_selected==10) {
-              screen=2; buttons_prev=buttons_now; buttons_edge=0;
-            } else {
-              unload_game(); screen=1; buttons_prev=buttons_now; buttons_edge=0;
-            }
-          }
-          static bool core_environment(unsigned command,void *data) {
-            switch(command) {
-              case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
-                pixel_format=*(const enum retro_pixel_format *)data;
-                return pixel_format==RETRO_PIXEL_FORMAT_RGB565 ||
-                       pixel_format==RETRO_PIXEL_FORMAT_XRGB8888 ||
-                       pixel_format==RETRO_PIXEL_FORMAT_0RGB1555;
-              case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
-                *(const char **)data="mass:/SYSTEM";return true;
-              case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
-                *(const char **)data="mass:/SAVES";return true;
-              case RETRO_ENVIRONMENT_GET_CAN_DUPE:
-                *(bool *)data=true;return true;
-              case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
-                *(bool *)data=false;return true;
-              case RETRO_ENVIRONMENT_GET_VARIABLE:
-                return false;
-              case RETRO_ENVIRONMENT_SET_VARIABLES:
-              case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
-              case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
-                return true;
-          #ifdef RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE
-              case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE:
-                *(int *)data=3;return true;
-          #endif
-              default:return false;
-            }
-          }
-          static void video_cb(const void *data,unsigned width,unsigned height,size_t pitch) {
-            unsigned x,y,tw,th;
-            if(!data || width==0 || height==0 || width>TEX_SIZE || height>TEX_SIZE)return;
-            if(pixel_format==RETRO_PIXEL_FORMAT_XRGB8888) {
-              if(pitch < (size_t)width * 4u)return;
-            } else if(pitch < (size_t)width * 2u) return;
-            frame_w=width; frame_h=height;
-            tw=next_pow2(width); th=next_pow2(height);
-            tex.Width=tw; tex.Height=th;
-            if(pixel_format==RETRO_PIXEL_FORMAT_RGB565) {
-              for(y=0;y<height;y++) {
-                const uint8_t *row=(const uint8_t *)data+(size_t)y*pitch;
-                memcpy(pixels16+(size_t)y*tw,row,(size_t)width*sizeof(uint16_t));
-              }
-            } else if(pixel_format==RETRO_PIXEL_FORMAT_XRGB8888) {
-              for(y=0;y<height;y++) {
-                const uint32_t *row=(const uint32_t *)((const uint8_t *)data+(size_t)y*pitch);
-                uint16_t *dst=pixels16+(size_t)y*tw;
-                for(x=0;x<width;x++) {
-                  uint32_t p=row[x];
-                  unsigned r=(p>>19)&31u, g=(p>>11)&31u, b=(p>>3)&31u;
-                  dst[x]=(uint16_t)(0x8000u|r|(g<<5)|(b<<10));
-                }
-              }
-            } else {
-              for(y=0;y<height;y++) {
-                const uint16_t *row=(const uint16_t *)((const uint8_t *)data+(size_t)y*pitch);
-                uint16_t *dst=pixels16+(size_t)y*tw;
-                for(x=0;x<width;x++) {
-                  uint16_t p=row[x];
-                  unsigned r=(p>>10)&31u, g=(p>>5)&31u, b=p&31u;
-                  dst[x]=(uint16_t)(0x8000u|r|(g<<5)|(b<<10));
-                }
-              }
-            }
-            video_received=1;
-            video_frame_updated=1;
-          }
-          static size_t audio_many(const int16_t *samples,size_t frames) {
-            size_t bytes;
-            int r;
-            if(!samples || frames==0 || !audio_ready) return frames;
-            if(frames>(size_t)0x1fffffff) { audio_error=-900; return frames; }
-            bytes=frames*2u*sizeof(int16_t);
-            r=audsrv_wait_audio((int)bytes);
-            if(r<0) { audio_error=r; return frames; }
-            r=audsrv_play_audio((const char *)samples,(int)bytes);
-            if(r<0) audio_error=r;
-            return frames;
-          }
-          static void audio_one(int16_t left,int16_t right) {
-            int16_t pair[2]; pair[0]=left; pair[1]=right;
-            (void)audio_many(pair,1);
-          }
-          static uint16_t retro_joypad_mask(void) {
-            unsigned int mask=0;
-            if((buttons_now&PAD_CROSS) || turbo_ii_active)
-              mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_B);
-            if((buttons_now&PAD_CIRCLE) || turbo_i_active)
-              mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_A);
-            if(buttons_now&PAD_SELECT) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_SELECT);
-            if(buttons_now&PAD_START) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_START);
-            if(buttons_now&PAD_UP) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_UP);
-            if(buttons_now&PAD_DOWN) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_DOWN);
-            if(buttons_now&PAD_LEFT) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_LEFT);
-            if(buttons_now&PAD_RIGHT) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_RIGHT);
-            if(buttons_now&PAD_L1) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L);
-            if(buttons_now&PAD_R1) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R);
-            if(buttons_now&PAD_L2) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L2);
-            if(buttons_now&PAD_R2) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R2);
-            if(buttons_now&PAD_L3) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_L3);
-            if(buttons_now&PAD_R3) mask |= (1u<<RETRO_DEVICE_ID_JOYPAD_R3);
-            return (uint16_t)mask;
-          }
-          static void input_poll(void) {
-          #if PCE_SHOW_DIAGNOSTICS
-            input_poll_count++;
-          #endif
-            if(turbo_updated_this_frame) return;
-            turbo_updated_this_frame=1;
-            if(buttons_now & PAD_SQUARE) {
-              turbo_i_active=((turbo_i_counter % PCE_TURBO_PERIOD_FRAMES)<PCE_TURBO_ON_FRAMES);
-              turbo_i_counter++;
-            } else {
-              turbo_i_counter=0; turbo_i_active=0;
-            }
-            if(buttons_now & PAD_TRIANGLE) {
-              turbo_ii_active=((turbo_ii_counter % PCE_TURBO_PERIOD_FRAMES)<PCE_TURBO_ON_FRAMES);
-              turbo_ii_counter++;
-            } else {
-              turbo_ii_counter=0; turbo_ii_active=0;
-            }
-          }
-          static int16_t input_state(unsigned port,unsigned device,unsigned index,unsigned id) {
-            int16_t result=0;
-            (void)index;
-          #if PCE_SHOW_DIAGNOSTICS
-            input_state_count++;
-            input_last_port=(int)port;
-            input_last_device=(int)device;
-            input_last_id=(int)id;
-            input_last_value=0;
-          #endif
-            if(port>4 || (device & RETRO_DEVICE_MASK)!=RETRO_DEVICE_JOYPAD) return 0;
-            if(id==RETRO_DEVICE_ID_JOYPAD_MASK) {
-              result=(int16_t)retro_joypad_mask();
-          #if PCE_SHOW_DIAGNOSTICS
-              input_mask_query_count++;
-              input_last_value=(int)(uint16_t)result;
-              input_active_mask |= (unsigned int)(uint16_t)result;
-              input_a_value=!!((uint16_t)result & (1u<<RETRO_DEVICE_ID_JOYPAD_A));
-              input_b_value=!!((uint16_t)result & (1u<<RETRO_DEVICE_ID_JOYPAD_B));
-              input_a_queries++; input_b_queries++;
-          #endif
-              return result;
-            }
-          #if PCE_SHOW_DIAGNOSTICS
-            if(id<16) input_query_mask |= (1u<<id);
-          #endif
-            switch(id) {
-              case RETRO_DEVICE_ID_JOYPAD_UP: result=!!(buttons_now&PAD_UP); break;
-              case RETRO_DEVICE_ID_JOYPAD_DOWN: result=!!(buttons_now&PAD_DOWN); break;
-              case RETRO_DEVICE_ID_JOYPAD_LEFT: result=!!(buttons_now&PAD_LEFT); break;
-              case RETRO_DEVICE_ID_JOYPAD_RIGHT: result=!!(buttons_now&PAD_RIGHT); break;
-              case RETRO_DEVICE_ID_JOYPAD_B: result=!!((buttons_now&PAD_CROSS)||turbo_ii_active); break;
-              case RETRO_DEVICE_ID_JOYPAD_A: result=!!((buttons_now&PAD_CIRCLE)||turbo_i_active); break;
-              case RETRO_DEVICE_ID_JOYPAD_START: result=!!(buttons_now&PAD_START); break;
-              case RETRO_DEVICE_ID_JOYPAD_SELECT: result=!!(buttons_now&PAD_SELECT); break;
-              case RETRO_DEVICE_ID_JOYPAD_X: result=0; break;
-              case RETRO_DEVICE_ID_JOYPAD_Y: result=0; break;
-              case RETRO_DEVICE_ID_JOYPAD_L: result=!!(buttons_now&PAD_L1); break;
-              case RETRO_DEVICE_ID_JOYPAD_R: result=!!(buttons_now&PAD_R1); break;
-              case RETRO_DEVICE_ID_JOYPAD_L2: result=!!(buttons_now&PAD_L2); break;
-              case RETRO_DEVICE_ID_JOYPAD_R2: result=!!(buttons_now&PAD_R2); break;
-              case RETRO_DEVICE_ID_JOYPAD_L3: result=!!(buttons_now&PAD_L3); break;
-              case RETRO_DEVICE_ID_JOYPAD_R3: result=!!(buttons_now&PAD_R3); break;
-              default: result=0; break;
-            }
-          #if PCE_SHOW_DIAGNOSTICS
-            input_last_value=result;
-            if(result && id<16) input_active_mask |= (1u<<id);
-            if(id==RETRO_DEVICE_ID_JOYPAD_A) { input_a_value=result; input_a_queries++; }
-            if(id==RETRO_DEVICE_ID_JOYPAD_B) { input_b_value=result; input_b_queries++; }
-          #endif
-            return result;
-          }
-          static int begin_game(const char *path) {
-            struct retro_game_info game;
-            struct retro_system_info info;
-            int r;
-            unload_game();
-            r=read_full_game(path);
-            if(r<0)return r;
-            if(!core_initialized) {
-              retro_set_environment(core_environment);
-              retro_set_video_refresh(video_cb);
-              retro_set_audio_sample(audio_one);
-              retro_set_audio_sample_batch(audio_many);
-              retro_set_input_poll(input_poll);
-              retro_set_input_state(input_state);
-              retro_init(); core_initialized=1;
-            }
-            { unsigned int port; for(port=0;port<5;port++) retro_set_controller_port_device(port,RETRO_DEVICE_JOYPAD); }
-            retro_get_system_info(&info);
-            {
-              struct retro_system_av_info av;
-              retro_get_system_av_info(&av);
-              if(av.timing.sample_rate>0.0)
-                (void)audio_init((unsigned)(av.timing.sample_rate+0.5));
-              else
-                (void)audio_init(44100);
-            }
-            memset(&game,0,sizeof(game));
-            game.path=path; game.data=game_data; game.size=game_size;
-            if(!retro_load_game(&game)) {unload_game();return -104;}
-            core_loaded=1;
-            return 0;
-          }
-          static void draw_game(void) {
-          #if PCE_SHOW_DIAGNOSTICS
-            char diag[64];
-            uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
-          #endif
-            if(video_received) {
-              gsKit_clear(gs,GS_SETREG_RGBAQ(0,0,0,0x80,0));
-              tex.Mem=(u32 *)pixels16;
-              if(video_frame_updated) {
-                gsKit_texture_upload(gs,&tex);
-                video_frame_updated=0;
-              }
-              gsKit_prim_sprite_texture(gs,&tex,
-                0.0f,0.0f,0.0f,0.0f,640.0f,448.0f,
-                (float)frame_w,(float)frame_h,1,
-                GS_SETREG_RGBAQ(0x80,0x80,0x80,0x80,0));
-          #if PCE_SHOW_DIAGNOSTICS
-              if(audio_ready) label(6,6,1,"AUDIO OK",aqua);
-              else { snprintf(diag,sizeof(diag),"AUDIO ERR %d",audio_error); label(6,6,1,diag,aqua); }
-              label(6,16,1,pad_read_ok?"PAD READ OK":"PAD NO DATA",aqua);
-              snprintf(diag,sizeof(diag),"STATE %d LEN %d",pad_state_value,pad_read_len);
-              label(6,26,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"RAW %04X",pad_raw_buttons & 0xffffu);
-              label(6,36,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"KEY %04X",buttons_now & 0xffffu);
-              label(6,46,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"QRY %04X M%u",input_query_mask & 0xffffu,input_mask_query_count);
-              label(6,56,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"ACT %04X",input_active_mask & 0xffffu);
-              label(6,66,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"P%d D%d I%d V%d",input_last_port,input_last_device,input_last_id,input_last_value);
-              label(6,76,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"POLL %u CALL %u",input_poll_count,input_state_count);
-              label(6,86,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"PF %d GS-5551",pixel_format);
-              label(6,96,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"SQR %u TRI %u",!!(buttons_now&PAD_SQUARE),!!(buttons_now&PAD_TRIANGLE));
-              label(6,106,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"T1 %u T2 %u",!!turbo_i_active,!!turbo_ii_active);
-              label(6,116,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"A %u Q%u B %u Q%u",!!input_a_value,input_a_queries,!!input_b_value,input_b_queries);
-              label(6,126,1,diag,aqua);
-              snprintf(diag,sizeof(diag),"PHASE %u %u",turbo_i_counter%PCE_TURBO_PERIOD_FRAMES,turbo_ii_counter%PCE_TURBO_PERIOD_FRAMES);
-              label(6,136,1,diag,aqua);
-          #endif
-            } else title_screen("WAITING FOR VIDEO");
-          }
-          int main(int argc,char **argv) {
-            (void)argc;(void)argv;
-            gs=gsKit_init_global();
-            if(!gs)return 1;
-            gs->PSM=GS_PSM_CT16;
-            gs->PSMZ=GS_PSMZ_16;
-            gs->ZBuffering=GS_SETTING_OFF;
-            dmaKit_init(D_CTRL_RELE_OFF,D_CTRL_MFD_OFF,D_CTRL_STS_UNSPEC,
-                        D_CTRL_STD_OFF,D_CTRL_RCYC_8,1<<DMA_CHANNEL_GIF);
-            dmaKit_chan_init(DMA_CHANNEL_GIF);
-            gsKit_init_screen(gs);
-            gsKit_mode_switch(gs,GS_ONESHOT);
-            memset(&tex,0,sizeof(tex));
-            tex.Width=TEX_SIZE; tex.Height=TEX_SIZE; tex.PSM=GS_PSM_CT16; tex.Mem=(u32 *)pixels16;
-            tex.Vram=gsKit_vram_alloc(gs,gsKit_texture_size(TEX_SIZE,TEX_SIZE,GS_PSM_CT16),GSKIT_ALLOC_USERBUFFER);
-            SifInitRpc(0);
-            SifLoadModule("rom0:XSIO2MAN",0,NULL);
-            SifLoadModule("rom0:XPADMAN",0,NULL);
-            pad_init_result=padInit(0);
-            pad_open_result=0;
-            if(pad_init_result==1) pad_open_result=padPortOpen(0,0,pad_buf);
-            pad_ready=(pad_open_result!=0);
-            screen=0;
-            for(;;) {
-              char tmp[80];
-              pad_scan();
-              if(screen==0) {
-                title_screen("BEETLE CORE - PC ENGINE ONLY");
-                label(52,210,3,"X OPEN USB ROMS",GS_SETREG_RGBAQ(230,240,245,0x80,0));
-                if(status_code<0) {
-                  snprintf(tmp,sizeof(tmp),"ERROR %d",status_code);
-                  label(52,299,2,tmp,GS_SETREG_RGBAQ(230,240,245,0x80,0));
-                }
-                if(buttons_edge&PAD_CROSS) {
-                  status_code=usb_init();
-                  if(status_code>=0) {
-                    usb_progress("SCAN MASS ROOT");
-                    strcpy(folder,"mass:/"); status_code=scan_dir();
-                    if(status_code<0) {
-                      usb_progress("SCAN MASS0 ROOT");
-                      strcpy(folder,"mass0:/"); status_code=scan_dir();
-                    }
-                    if(status_code>=0) screen=1;
-                  }
-                }
-                refresh_screen();
-              } else if(screen==1) {
-                if(nentries>0) {
-                  if(buttons_edge&PAD_UP) selected=(selected+nentries-1)%nentries;
-                  if(buttons_edge&PAD_DOWN) selected=(selected+1)%nentries;
-                }
-                if(buttons_edge&PAD_CIRCLE) enter_parent();
-                if((buttons_edge&PAD_CROSS) && nentries>0) {
-                  char next[MAX_PATH];
-                  int written=snprintf(next,sizeof(next),"%s%s%s",folder,
-                    entries[selected].name,entries[selected].dir?"/":"");
-                  if(written<0 || written>=(int)sizeof(next)) status_code=-105;
-                  else if(entries[selected].dir) {
-                    strcpy(folder,next); status_code=scan_dir();
-                  } else {
-                    strcpy(game_path,next);
-                    status_code=begin_game(game_path);
-                    if(status_code>=0) screen=2;
-                  }
-                }
-                render_browser(); refresh_screen();
-              } else if(screen==3) {
-                if(buttons_edge&PAD_UP) state_menu_selected=(state_menu_selected+11)%12;
-                if(buttons_edge&PAD_DOWN) state_menu_selected=(state_menu_selected+1)%12;
-                if(buttons_edge&PAD_CIRCLE) {
-                  screen=2; buttons_prev=buttons_now; buttons_edge=0;
-                } else if(buttons_edge&PAD_CROSS) {
-                  state_menu_activate();
-                }
-                render_state_menu(); refresh_screen();
-                if(state_message_frames>0) state_message_frames--;
-              } else {
-                if((buttons_now&(PAD_L1|PAD_R1|PAD_START))==(PAD_L1|PAD_R1|PAD_START)) {
-                  unload_game(); screen=1;
-                  buttons_prev=buttons_now;
-                  continue;
-                }
-                if((buttons_now&(PAD_L1|PAD_R1|PAD_SELECT))==(PAD_L1|PAD_R1|PAD_SELECT)) {
-                  screen=3; state_menu_selected=0;
-                  state_set_message("SELECT SAVE OR LOAD SLOT");
-                  buttons_prev=buttons_now; buttons_edge=0;
-                  continue;
-                }
-          #if PCE_SHOW_DIAGNOSTICS
-                input_active_mask=0;
-                input_query_mask=0;
-                input_mask_query_count=0;
-                input_poll_count=0;
-                input_state_count=0;
-                input_last_port=-1;
-                input_last_device=-1;
-                input_last_id=-1;
-                input_last_value=0;
-                input_a_queries=0;
-                input_b_queries=0;
-                input_a_value=0;
-                input_b_value=0;
-          #endif
-                turbo_updated_this_frame=0;
-                video_frame_updated=0;
-                input_poll();
-                retro_run();
-                draw_game();
-                if(state_message_frames>0 && state_message[0]) {
-                  label(12,430,1,state_message,GS_SETREG_RGBAQ(50,210,175,0x80,0));
-                  state_message_frames--;
-                }
-                refresh_screen();
-              }
-            }
-            return 0;
-          }
-          PCE_FRONTEND_C
+          python3 - <<'PY_FRONTEND_DECODE'
+          import base64, zlib
+          encoded = (
+              b'eNrVfX132rjy8P/7KRTuaYsTJ8UE0jTE6SEJSbmbQBZIX7anD8eAIe6CzdomTbbt/ey/GUl+k2Vj0r0vT+/dFtvSaCTNjGZGoxEh'
+              b'wZ+X27+Q6M82uTlrkQvD88lNv0p2ifmwNF1rYdq+MSeeZc/m5u7YcU1yZY1c03cdMnUd2zftyV4SzqnhmRPi2MS/M8mpafpzM4I9'
+              b'DypTUCssOXok/U6r71tjKNhcuY5rCBAHd5YXtkbgt21+bVDwFAq8GK2suY9FFsTyPeK41syyEW9n5Y5NAVzHIb3uNRQiU8tdfDUA'
+              b'xGhlT+bmZI/ceqZHIS9d895yVt78kfim5wOe77TKy3eaBgNz0RyQiWvdmy5ZGpYrgjd8+ERHEXp777gjy5ta0Ddn6VsOYNUgU2M+'
+              b'HxnjP4i3Wi4dFzAeG67vWpMZtO7Y88ckyJexp5cwUd1++wPxH5dQGJFHIHMLMPTvXGc1u6P4w/TNrbHFZtN3nPn4zrBsHDlAityZ'
+              b'xgSwhxet1vDs4qp52d9LtvMPyx7PVxOTHM+8Xy1/7+5E+nGyMHK+QlNLY5L11bOm7nKcWdcxJjhsmbVH98Ol4Y/vTC+riOUsoaPL'
+              b'rM8I/YPlDHOQgK9jZ7Fw7OwCD0PPN/JGgNJ71ndjNfHc+8w++hPLyfkI0LO/usCzWV/HSD15rdpCj4Ds+s6CUnX//NeXCTLyyMQh'
+              b'tuMjzTke0KO9hLb9KQGmAiKjfLpyXZAkcaomZGoa/grod2GMXcfbI+fmeI70jBwMY2pPDHcCkmdms2IBRQN3JEnVfPBN1wZi9sOm'
+              b'y0DtLtmGQVABwl/m0Kf/qCAwbJBC7OvUcReGr5K9vT2lEYMXH5SJObVsk1w3Pwwv2letPtGqhxnfb5qDt6SuVSWfQdwMr9rX7QEp'
+              b'H65ARGiVai38V5FUGLQ+DPvt31sCPJiFc8uY2Y4H0pI4IIDmxiN2HMaWihaQVqZtjECUEegdDD3IRhRfDTKxPHxPjKmPcwKCAp68'
+              b'O8fxkUwE3udYgNQe9t923w/P283LTrc/aJ/BAMhHik/CysYJg+bpEK+80WRouQ+fPqv4+24y9cJny1kY9kPwhLz4ANzGHxlbsKdG'
+              b'Tit0znF+g5bU8DFsjL+K2uMvYk3yN1GrGeSAXANjA9TprsY++cZ6aRsL81O1fvC5QfGZWG6D/CAt23cf43BQTMCs0fcwS8Cfpvcp'
+              b'JKzPkqIIzeYlAUVzbo5hIYJfY9c0bZUWW3kgoSampDbFberMgQc/BfT5meiktDA87+hlKavKDLqDkvUuqiUpmpzobVppYviGpChn'
+              b'QFoEf2c1DEvFcLSa0qEkw6HhQ8dHK98cDstlY05bKx/UFEWRtcFmBECcrnzfsft0aChIy546eR3AUR7RSt7Qdr6q4QOqANGTCYtz'
+              b'I8mLb2Fwd31nF9QIk4CMGjlHxBg5K59odbJczUGXeOmZIHImxPCpHAz1oH8dVMjbv0BjgUEhruGbOSw4uO2ddoc3rV67ez686DWv'
+              b'QQzVVrmFu52gYHW1pusU76EFVLQCOQLykr8I32QQZlDPGKO6E6vGXghDNYDOhxqcMbk37DFoLwOsAwrPGPQtkErmYjU3UNWiw7JH'
+              b'2tNQyUuuHMbcAw0SxJ0HqCxX/nDpzOdlRaXFZytcN3DygHVAQyLBFLBWhYFO9Wi1nCAOQ5SdQ4qIbABg2Qc+hwaGlOHxB5DuplQb'
+              b'aA+4POE/TwCR5EMXFmRkIe1g/7BWnIlwdfdRlQ6G+wXo2EyNvezDmn99NtAOyNJ6MGHEsbtjWIWPyJ0xZzO0MBcOCDVYsslqiYob'
+              b'GcHvr9bEvyPOlJwN9qvyYV/BuGsH0H0GWzv4FK582+EiuLEwuOxDVWCEFqx9D9Lvl1fd0+YViC0vg7rvrYkJmqE5NmEQQOSyZ0oO'
+              b'AYWoDOkhUyNAsPZagx7waftD62p40e1dNwfDSu/yVKvX63kTx4B+BQAg+FT+eIeP1VoGdjhFINcs34Kh+AtRoW9w5M1JRh1YEpNV'
+              b'QDtGEbcElSurDopPJKlHgVhuwGbZdZamzZcgapOBArh0HZhu+P8cSYeyZja7BcCHzh8qfcBv5vDemK9M6P2upkZF5qa9ToTTssbX'
+              b'IZfXAKHyMIU/q5y+4XhAA95q7rPGsE/8RSOhG0+lytAalJhsYvJwCKsu9JO9+nNluo/0TaMQCCzJK1GhXKwWCkVWPmiXjXAWiKjm'
+              b'HJaoIRqmfB5ibydgFo/Z/KwHYU3SAOj8FuuAQftMlR/2YhS8yG3aYG1ElVJN/gNWIWsqhwFKICiFC2eymgccpfKXYCgydghfxB9M'
+              b'13XcvI7xOjAFMCq1mlapZKiZKI4NYCA6XR56SSSCOXTDeDAiyNMGmgCkedOmcvi2fwr1HdeY5akW/UFzAH9fdQd9Us8tg7rg6ccB'
+              b'aBRl7aCQDRPVfdfq9dvdDtFWObp0YoWni9nCmFnjT4cJ7ZPQJWO/CksGWD8e9DjjK9U27wzvLuP70njEyU0ppJIiOVAE5Sm/lLTY'
+              b'Dxwn1FbNt9SYzqBsxrkL014NAzsAJVyWKh0U9zyY/08HNar3l9bApoXZGgcMJtDjEjQzQP3OQWocg+Hve8zfhpQZeqDO3g6I4Y7v'
+              b'gED3SHM+R9ggRboXF3tJDQ71wVfEu8PFB2i1+fKfxtKwCZoyzKkFbLdCex9X2j1a3P/qkObVgJUR9EGoAMxgWMhmHi5pUA1s4ZE5'
+              b'Njj3PFI2MkB7mU5N1NcI6MewVE09089hkLO3LVjGz7q3nQHRarmFrlud22F70LoGFhGr7pCqkmtHxtwS0LtxI/GGGnh0qrhx32Bk'
+              b'c4bTIJnU4BNZjkHa07n6JGCEBJFkuW+k1O5ctDvQAwLleiARYF5KKilp04pRmxxV6vBQIT/UzGpX7XeteK3JtFagFiyqg8vbTry1'
+              b'evWocphZ7127c9Y+vWphDfLP5k2zw+tV6/UjrZZR723zHbQ1aF62yPtW86bbSVUf10bZ6GrkbXtAzru32PDZ22a702++T4Ew6uOj'
+              b'SiUXxMXVx3bnklw3+7/20/UPtHX133evmx1y2u1LatfNdbUHvVaL9LrdgaSysRb1dgeU5oymJ9m1W50mjtrbZu+cXHfPW9FUa5UD'
+              b'mGotox7MVi9olc1cvMlK1TzSXq2jrlan1bv8iIKDt1jNI+WAFpvX1914nRhBxmV3lnqOLFdIWN87oCIx+QtyKJDB5Tjz83dZHspA'
+              b'6kc18C/vE5X4zdOz89bF5dv2P3+9uu50b37r9Qe3795/+Ph7Ravu1+oHrw5f77482huWFak7iAIN9Ze5Y8/YX7P54/KOtZEUIpWH'
+              b'2sG+Nh0fVM3bqyu18rBv7muv4HHKHl8dVrXKYW0/9vUw9nVc1V7BV/oowK3UYt+gprGvmREg3uq+FgA6hOKV17yw9rr6Gp61sQRu'
+              b'rV6ta6/rUU2KYFWL4BqTV69ij+PJQfCISBwGfZXhG3Wt/nq/fhgNC7Ya+7pvapVXlbA3DAOOvgCXtxngq2n1+GPt1au6EXs8qBrV'
+              b'qhEWRrjBowAXOo5/tGh89w0zmsZDitG4FoxSDf5Uo0kG9GvVigxfGPZpzXh9eBgrmpxGeAwAUfwSSGivavLx3Te0yrQWIliBP9ND'
+              b'+Is/1lhvgkcAXIHe80cYsQr9I5u34E8Et9jjGrlAOX1ujMx5GUXEg4p/P9K/vbExN9U4z3sq6o4HtSGa+nPHVQQ2o7aO6qpj9UtS'
+              b'5Zw6btnSKw3vk/W5Ye3siBVJICJ0ukOi+A5obqZbLifcSApWVxpCTYkcGFm+p1fEgojEF3jNBNGXz40viIjFNmXwha6P7wAzWpuL'
+              b'EigF5ozxR+OHBJgLwNzjVw0X4eCLMUI/rjfGHDBCel5GsibHx6Tsbtd3xoqS7jyAA40eRv9BL9NfSvlhp2xtH0DxbToNikoeH8OP'
+              b'jzsuf91IQaLbosOlay2GHvztm+WZpz48qI+P8PcOm9PHR/5DU9k8imCSvU2sLRkk5Fs+2KVsByCxTnirEf0m9jqkpNFMv+wP+y1Q'
+              b'AS6HvcvT5m9lrapWK+p+HUj5sKJWlIa85tc76F6qcnW/olZr+N+6+safKyNVvQ41tYqqvcqozcZ3PDcNF0d2NBO+M16CtmuH6r5a'
+              b'op71Zn+AO5QllWKcVeH1a7WqBsOlInKJklkj75pT1/TugrHHdzDWHM8/V+bKHJoP5hiQVRr8rfdoj4fTubVkL7MgU+fX2Ahhpnjd'
+              b'U4lg58b3KPTY7kWyVMzFJrJp3LUmfgOO2gpdf2kuEnx1+q7WEL1vusT3FkcbMIVGE3sr+Aw23MoVeppkEU+Hli5Nn1rM5TTViLh5'
+              b'qZ55W/pN8zzwfAyoZvr8OUm8Bt3x/Gxwo8n7/p/op63jMqFAcz2YBOyo+jzYzFJyZtJO9dc+1iv/vX7EKVCT4B1DoRz3ACpBZ/dG'
+              b'vu2R50SKYBy98r8EgMq6WrQXMRBQ/l9xvlojFJAxqX9o4Uwo55JtYzIBEQGrd9yXCdMi42nmZdYrKrEmet+atkB2XFOv4+kKXRTl'
+              b'ABjUh9nvoMbxnFUSCIDNAilbk+OK8saaHJXLrBw+sl9HlUIiDvcIlq4zw3aTi4uPJojQi8RSVHqnVUnrA4ZGNW/P292SVPrWq1To'
+              b'g/hFgOr6NSHV1YQMVgpMUbDvkSlc3RTLCFslCh9gQUomBquE1ibpty/IS9Lu3oi9h/m9AlK5sOZmG3GBxQBe4c+2s3xrGkt8E0Y0'
+              b'DZmbZzhfjPB9fKNGZKIkElfd5jk0f93sfBAxcPWQVmOREEJkBDY2LbtAN7zL7trWMHjhQ3q6Y83F4yzEwIvNGqRjnNkgD+cKxnfT'
+              b'jjDave2fnuf0JQwzSQSdPLm1t+cX/TXNRWEsqcCWIs3GyDifdBhC5702OutJr9U8/1iSy5lKAaZjWx2U7UJZ6JqgJGEkJd0CKcCJ'
+              b'3DvKo3KmC9wmh79T7Brbi1GInFdRo4mzUXpB/Ldx6I8UIpIdpjQ+L7fJVfu0f45bqzRypF9FwYIRrfYkiD7FIbVcFkPLIwmTrmz8'
+              b'wwQf7x9bYcol11lUjmgDJb64pGyTGB1GgVGqECiVqsUpEhTj2K6Y7ga6AnEbRDTxJONRdBDDHbn0ALp6gCWbzr8Lz7DJfByBUPdg'
+              b'rfqT6XHlJPGTNwI3kCO2ISigiUColawdNOgDrMa2bc49vSrKDN5Z9CKygITyc6igpNgAOo3qboDels7ahXEIMWZbkzkw09ORglqt'
+              b'VupJqPTNxlA3mKAE5HtnvlqY5dcV6QhsADXatI0UVCXoVENWlNNGooHKkyRpKDpt8wH3479WI2l6n7Lzw8IiYYIxDCxvH9/jFNnH'
+              b'QViNYh8fi0U5YnYBEW+BkjxOuqoxEFJEK7Gz5fg6CHV3fOeWsaz6Yu+FfI2Bkogs/PNJ+xz8qoa/9umvLfxZw58Co/rO3Pma9mox'
+              b'aIquv1i+2KhSlVYab1Zpn1YyXxQYyvFiOcQwz0c+msyYWBpq4nEkH1oWT7pt6OXEMxhQ6vYo9XKUXj13TyaWS7Z0MqK/wiWUPe6y'
+              b'78lqoqyl9CBzA6Iv0jqu1g/kzkhWc2zoGeMIbdPgWok3klcdZVUd5VadlsfGlj4eBZrT2Ngdj6TltsZGhv5PUguEvNyP9QSAzh+M'
+              b'J8y0USaBdnuOEUplFtWrqMK0BLHCaJoHG08S3w6aiSGjpf3HjUZ6ohbmAqRq+XkU6ghaA6oCDoAL3ykSHSLAG8VieaLGIMiXZL2i'
+              b'MEew8DGqt0fnNdU4fa3sap/TDmmcRpA7wGZiebW0V1K+f8/+Cp8VYCHfslemDOxFuzvsD9v983YvXpseCQGNBsQhCiouK0Vk8yAH'
+              b'c3mihyHimcUBe3u8fCwHQeVB3c+sF2Kv+NAFpSufg6FLzYgc4KdMAJKxT4MAdPS1w/ZGO0qB2tkJgOQqXpzgxnPHgyEX+vSn57h+'
+              b'gLkaBteneqSooVCWr1CgRbxxjypFvComxvwM0Tiw5V4IHiBv4+I4j7E3cR1YMbfo9AJ1stcqjd+vHL0sqa+UN6+ODmQeP6wIrTA3'
+              b'Ce6eMEddSsPixwNsnDr9xcsXyu6uLVUeThDi8+ex8lvy8kGJFCnEDivoobwr6HjHc0TDket89cxsGTm1XA/0Cy73duuq9b+0nUE1'
+              b'IH+x/FSrfFYX3uzTYUUIbEu60zB+j9nkp73u+36rJ1rjAdMDTJVTBqdieEOZGVtLvErNSbglosF/VRVBpbZDGJ3g2MKywca4Iv++'
+              b'8/okYCiFz0bwvPt6M5BMd6CfQH8IoKAstY55W3KNIjwABkMcjAf8VNTSszF5trftldSAyS0qit68OH9x9KL3Qq0exL9QgSYKIO7D'
+              b'hFk+rO2UrV2KibJdxbHD9iw9JL83OI5Hsm2oFA+GqzYsfWELzEta6nTZkREU/7m7WjW1piEapdsbct593yEfSPem1SFdcto8+7VU'
+              b'aJeLRZbbGEYHfGolVHsfLJDEFrVtmpP0ZmMgydLeFwRAvn8nW0FFubIUykBeLA3IDqtqEt2FItrAv6TUwdCz0ssUE3NAakhjWB2I'
+              b'IK3u5yr9vBZo/RkFWJewiEKAeCWLPhBQZvd+PNUX58VDN7l/RSpEA104RgLhWTC1lABTUnAu15QkvGgRGW8sl/NH7lWb8JhFKZLJ'
+              b'MPE0ecQOQijS/amX/Dw5j6amMdSsQXQcEGMywTND9AV8nBkuzJnn4aEGPJcanK403NkKz8bviRTSMykUG5etXQBGj3OH1QJB5jn8'
+              b'3Iy9AtvDBpKazeYmD3/1jKmZOuRKEpi62EpZwh3SyVbkIxEZaEJwKBWtaeqMRZOChORdUlIsIoxo2VJ9d2WqydrY00KEwc+tDg08'
+              b'y/A0ssjvJ5F2S7LGiZSVPxnpoL5S8+qK0Nb7GBBdjC9WNnXCIndt3G/JmaV13fr2S/ZcSrsZFInjmSoSa0Kv5Oruf89MhYdRoUNT'
+              b'UKdiLxrhTx2d3oJGHB5RFYEmj4PpRcQu3fWeroBs6aDE104Uk1INdqLaqmeaqWANvm450ynuF3t/Jb8GxnlwhDAyzYM3omFuB2Y5'
+              b'j6QoU8EdAlAkJkW4yZRe24NqeyBWoV26yofvgjeJFyfhgfgA6q5wGgb6/JdeZv1WEnUb6Rmj01kWTiQrCxAZzrjs/SURkxFBRO2L'
+              b'6kToc+miy4WOEJqt3WHvvNu5+ihRktGx8i3JCRz8dCJQGp1lDv8KH6A2zBu1i1utX9G2SDeA5bZAS/zGK55RE3cKNq60UehTVWiW'
+              b'qTlAR8cwLFI33lfD9vmehffXLpSUuWmw0AktxAmNnztVlKi68EWEEpIgjW+BzvOCKkKQtYlxLEhI9gktQQoOAlDuG/sIhmI/FVoI'
+              b'fIMGVEgLO9DbEI2A9uwULlBqJyTNNUE8KRxljCUnGTtTNon8X3Q3ITiOxJYmPNU0HD36ZhDpIfAPjkgieYYssJDCo2dVtYMDbf+g'
+              b'eqCtpKIrc0mmLM1MOQD0/3SC7WL0Kjxt60Q7ePXq1YH2etWQK8B3m3U6PBUmXUwTMho6Feq0jcxiGNZpQ1F0IN65MS2YgFWpNJ4w'
+              b'YHRJRqBgiNAfnwLfDEGc2LcdUm2gJtue2Q7NoIIZHci9R7hviBhzy/BSKiRj/+1lmvWTkz+GhkTrRm7TbC9h6kQOofM4Ts3genPm'
+              b'rohKVOy4hLi8gtAPP/EfqTNxkVMlcSROJeGP2Loafk47TpOn7zLqfBaPhBDpQTxKW3Fwlc/kDdEOK+SomPXHKht/MLr0aPS5N3d8'
+              b'NeBzy9VCPseH4dhYqlLDN/0nBFGNg6huDoLxDAeBDwgijz/RH5nNliPDMxt5+5AS55w3X83wqKRUfn1JqZm2zM2BA3tMlyn8daKL'
+              b'Z2xRNYryq1Q+h8b+rrgRC92DqQ99vzHzOub+BUoIH4EeZJldqEslcIrRuQ7nuPTMA/wwaLqkUoexbHVClMPF7kQPKkeIV/Naq6oh'
+              b'OUStvaQj0t+o0Wqy0X0hohOmO9xZjoYKhWaDfcS/3uBfO9pRhliP705jScnuNJef+BXFM/67pfO96i/HAaMDHaFMWCdjdVGUUvSk'
+              b'biHPmNurRXkMhjyl0i87O5+FExzj9ObNHLCE2l9oeDOtxtz2wxdxMPCYJ5lZl5MwdAZjd/dLWrP+ggs5LVkB2JcvGuwBKr1oBg9V'
+              b'eLgOHvbhoQUPX/SauMazBlNe6xiJ0WkOxEWaxF4+84bPKocf9pAbn01KmTIJKVHF5tRkFLKoNSgqQtrRilBtJMUCqq09OZ6O4WHa'
+              b'3gosaZaAxQnDBfKNSmHrmBZLbwmf6CxaR9w8i5AU5oYpULz89R+4mUMnowKrvQC/GAY5m9K5O3o/O4qWmQx1pjJSeFGVqBMZU4LV'
+              b'lVhfRMGeW7OaqFn9yY5+xVNJQ/PBGPtl7l6IB5SMaJi5mqPhS+2CpS63FxQGTyYwZbB5/Mbdyv6DGVMnAevQ3EXKG/rPUWhKNiS1'
+              b'Q/vqPT1/Bf3jcfjKUqWQ8+1IViRroghZxs08OkC7xey+jWeK+ooSE1V0itKT8z80LYFp///ZbHjGPfwFcj7UlRVZehLk9ChFHlV0'
+              b'Yo/JBHq4tSpPp0fiJnYjd25ZOpJkmWTyEJ6QsyHzLLpr9kq+yVzWnS65bF63CMastzBSPTY/4mKNrgnmDA4y0jB/hXSbIvAKIoVJ'
+              b'ksxkoNPnORwGLXLb6d/e3HR7gyRa1UbqABIdtWz3IDKB7PgbrbYej+7tgHQvyHXrutv7GMdkXxLQuiWMT5k3Qzlccl6VOq8DVBpr'
+              b'MLlotq+Sg1HLZQs9ZRpSs5Cuf1F0laZQyo69qSqUuIM3dDmXxxlzt690yQ1MEbbkPaHjjAr6p+S83WudDWD0SavX6/biA1Bfs/Ue'
+              b'6pEY+RALlUBNcg9+lGhPlaArdGOavtmpneix8k/vAE0aO+h2gcM6l3HUD/JQDzz+jN0jfz97FmeD+znZxz2aVYmel6UYlNRDoTgv'
+              b'x9Mr6ak0TtLSoYqsp1Rmafl4+iXgTe4ZkywpQvlYEzEHZoKNpPWFRE16buKmZJ1UpYxawoYBkhTbL3jfw/2C7+zhrNdqDvjvQe+2'
+              b'c5axj4DKeEEawugQFu2RYoBXjQyuj+uGsDgElJRLR8jVGKSSBSRnFmi8T9IVTjVdXVznk33OCN0P1YuFc29SBswZnfc9mgZGHJnD'
+              b'XIOGg5abKmEZDBKi88ylhEQMbIJpr9XBtTaF6uvcA9FZ0HBlOC/9rLHEmPRv1YU2VmC4goQXEmBo1eZK0n9IAwoQLKwFBRVwdQl+'
+              b'b6AN0YOEm2lD//5FP0tjila7FH2nNKXNN7QjrszY0Y60EWGnOrG3fCzIv3QAWSa3XXUHpHV9M/hYWAF74gZz3vjKF4F6FhXEzM5N'
+              b'1oCEEI62NrPRetsC3umlETuQqMiorCyWOcrKFjMYk1rKVlpNgUKit0/UVbbSygr10Et0lGxo8VIy5o0hGy+6pce4XwRdDmKNleRk'
+              b'7EQfpCBj9eJknbkuFZm8duesew2Mixn3kqpFbtqHfKsrMNwlvcg3xgohHhOMmebZYTGmCHSajRAupuqIRpJEn81rdUuXqMZPN0TO'
+              b'ur3e7c2gsN4RWbMwxSl7Ng/xp+PYAynQ7cksXS0/rCxbqRTtArm5IK2TVSm/Fk8HjUe0hIz50at0Cvq18WhFgv0yxzXUbZ6iK8aP'
+              b'aERZajNPaViSnVewIhafarJEv/+98xrJ0xjUzfKSRIJFnt4EUNK016oWD8Pvt65aZ4PsQPx4MIy2Lz/VgHuAx8JeshKddcDxC5Zt'
+              b'/K2o3C+ESglue1k7Wub2YArwdjUfNBuEEPSuUD2vKV3XKvnAgcVvQdtGlbuUC0fLh0NjRwmm5M0Ak1e59QEzpXazTt6EB0Fqqlar'
+              b'7ljbVTyrQeHgCZB0puYNDoPIQkBO6Nl6MQpE4VhA4zX4T1OTMSuF05rF8KVyCPNqSZk3Qi7WtTRVfpOmnxA96xJQ4tCE012g2e1q'
+              b'fsORGSsBJlLwJogwik6ZCezcXbWRnadNzKW1UZNaZpO1hiz7bPq8S3otkJ8ceFPiEessI8xRqX9z1RwMWr233ds+qFdgp6TZ46c6'
+              b'nY6aiAdHBv3Unjy0BVgiNoLrWEIy2GLsulScZx7USB+Rly3bBSaBSM98pA+tx4LqJZ2Jwuy3ChYU25Oe7FHW02PB5jiBEpZj+hwo'
+              b'lD2ft/vsRSY3y/hEXzt3kvMoSiE65oS7/+8kXK6GRT3LVsNUdrgyQxlLhcH9TyljCepn8kmuj2lVVaNrY0wfG3QvL9Ffnq2P5bCn'
+              b'VA/AVvYPsBWmGiXQw5tGQZWAn3Ldj55+lZCi6DuKnZgluadwT2Q3Euy+DmrJv+advpXecLD+JG6oWsbZKS3cctSwZx555pVU6amf'
+              b'N6VuB3gdz1EJBfD6hDzN8adQ4lKFREe55OrlRkCREJFGmDEm11kjSqsfxo8eI9kFmqeEiv6tmidgU6sU0Dxj2DNNtbSeCyUSbuQ4'
+              b'c3aUzLTvLdex8fxlzMHkLBaGHUTO8NNfSfv3q+WP78q8oCQ1NoZ1sku8Wp137V63A3MxQEmVuNTrKDW58XvA9G0eHgXTsOCH4xL3'
+              b'hG0r4jWJCXM7AUuXXCkGErN+UJc4DaXYyCB8ABCH8OdnYMguNssZw0sYw/7HPoiOYbhdnx7H7UQgHhsonQc1s9ql4HQMHindpG0w'
+              b'h5/cMtTtP7Xhs2ZneH5705I1SQmat0XBPq2Jd81eG4XS8PbmHATIupamBsinn2zqKIt6GXCavND0oxu68eodPD09MafGau57kiyF'
+              b'OcwXtNo/Kl6n3bm5HQzPW/2zXvsG5nyTumfdDry+umr1AMxFN7Oz4uD9w5ripT7yoaNJcYfv2uct/IbdKT7s6bqySUa1js/xfmJ+'
+              b'cTpadNkEGerfMVchKYMRicfUaZo6Uq4q4i1I4h1pVPtlE3iUmO6N1VTmqxyPEunO6HmzUJrTuyOjxzvTmt35QSDkEuV4ZiTkg/qo'
+              b'+l9VMbwftTpsAx3uFLoebCQhaP5AP5yEd1CGn8NXisyowrPxRYWuVFGiHSLHYfQ4uzlzm9RW0vYiGyarYnUlO/IvOMXptZM6rdII'
+              b'rp3UWX8F9furHmUgpOXBEIcBjF6yWqLWbj7svacj7YNtg09v2Vgnp2bjoWQroDRlattmd17fm641xQvJmivXcQ0wrKz5RCV87eQp'
+              b'VfGqPKqZ0BwNKZbaJs3bXrfXHN70q0PUGun1Arhzzqp7zsrFi2vZrajRdalN7bR+We/V99IAz5zlI8E0RuElqmiMOcQI71jFJCIr'
+              b'F3jWdvBK3F0KHQOx+UanRHKitv4I1sDjMZ+7R3mqPR61DQ0eAg9tu5gzXXhHpcdOQEyP25S80qoKDygL7myNVQC+A7hqghy3ubYb'
+              b'3PWqrLsFI0bdT2aqzQeFnswUR4W9VMqFBkriggnvt92egO0lHbB0JcT9AXB/OGa8+SBHPX5ToQ54f3r43JAVCvMv6+XlyYn2Wnm+'
+              b'r61UMmOPGn8c0cd9+iQDA/hDA3o0i2W01CuV1Xf3e3l2fFxXvpdHx8daRZEMw48iEy5h574PKxTe5hxedhnonWT3BHhtl3NdyHJ/'
+              b'B3ew+RIIgb38XyYEdo3yBoRQSRBCPaSD5X+DBPJ2N7X1aU20NbYjVxx4pmnDDo5OhbPiGYvlnCcCxDTj1PzNyG5F9+gbBe4R2OJQ'
+              b'UY9gELmasSVLWR5cvCk6dZglHlBK5UGbsj9iEuPd15XwSo4AmDCwFHOdfduurgLJHMxnRk7pr4blD2lLZXrug0LZMK+yHJ+wieXc'
+              b'eAyaiFtiSjAvaxtONivbyE6Pb2YyKgrLsc1gZMjcnPpq8OBSXSftVGUcaFjup+rnBvtR+axjVf6kfdbdtHbFfLQx0sSyqpbpDsH7'
+              b't/tVcma54zmeYccEcW2VnLmO5wWP7Qbp/7kyXPPlwLUMG3NL4R2pd858sus76D0yyQBjDUj7Zbu95m525sT44jziBSt4FfX6TERY'
+              b'SuKgLMe83c/xup2zXrffp0FXQjCE6JZDgOS7DlbL6viYaQLnrXdt0Mra58N/dj8isFOlQIPt3tlVK97iTzTYVFKpxc4dehE6SO6v'
+              b'uG6lJsGj8xPcUd5uw/C/I44bqI88D9id4/9hPqbNZLzqTOgQCy9QCmLMSzfWQsWbN5Wi48BKrwV6e6NsMLhQei1EdOkrhSHS0mth'
+              b'XrUuBsVh0tJrYfbal2+LDycrvR5RbZPhvCqA5UYAewUwrG6EYbUAihtB7BWAeLW/EY77BXDcCGJvP+M2p1DLQig5a8EtVYG4NHds'
+              b'tEhNl5iL1Rw1I7bqsQu0cdWYuo7tm/aEjI353KPGclLwmQ9467bl09uzpw67WBvEv7uyy4oav1EbbFW8v4J5+CawbKLgQ7BJgFjS'
+              b'NWcWlHXp6rBcodNgPqdlR8b4D1KeWMbMdjx6d3X36gpXoEdMsuiTv0zXUSR3h89WKF5xB9W00bHorEZzzLd4b9hjy57BvETex4kD'
+              b'Khg2RixYyWFUXPmCR9f+CD/JKvcPAEuDRd523w/P283LTrc/aJ/1BU0ggMACAZMpHSRuNaChrLg/5Zf1W/pZdUEX0PL8LMmbz6gc'
+              b'/+222WulTYzkSom5gcpCgCR5RsdlcNs7BRO91Wt3z4cXveY1nl04jn3qdoLXjYw2OEAxD0aGjSiioaeT9KeQr6zZCEuPy6DXbnYu'
+              b'r7JHRjY0f//YPHFwioxOseGRnxSiOiIjeroRGG3JLR3Xj3y4E/PeGpvxu/Em5kPscZKlUgc35cnUZgqk8TQWZduWEh4NCswNDxnZ'
+              b'5Rnt8FdmMdY7VpD9zixqTVgxa5JZhF1eWVkjOED6n5qmDwojTRINFWHJeSR/rkz3keWXhXGzfGP5wiNTa+rf0RlpMBdpuBKAxHc8'
+              b'7tMEm4cs7x49C8QlXtAIL2gdj1R2azJ1FD+e1GjmE9ZrYJnESof33CtbeuIdW/qUQrdn4Kb9RNczVk8KXZK1lBJMaNemDRhlY5IJ'
+              b'pgerD+kIyylHMo0sm+Iqwgaxk9diXDgMFYdEMpqCIFirmDxqqyxWgdkBZQQvSc40aRQ52NFPgT3NAmvQsbRML2scR/IC0t2p4GoG'
+              b'yej82FhEIN0dawcKx4NNeUKjs5IhqxKUeMSBlR9sIDF9jgIahsGWmFENIr0jJQ8mGj95UJlxtDlcNIDy4DIDaXO41AjKA8ytpM0h'
+              b'n8ahbuCReEJTzfymMn0RT2iK2uB548WN9CdApj6DXNDcq7A57A9H0erOa1O/P3Wb4D4dd1Kp1Ligrq13+cEDqSY+ypsIXTJRI/FW'
+              b'Uk6xtXyQywTak1ggl/yfBPKqmotm9Ulo5sLsPQnm1X4unvtPwjMXZi8TZhDzkCKjn1xgRDVBtmyhd5uvsM9JYj0SNQXJgrROeWqi'
+              b'uz6hNAQ4SBbntJ2UA/k0gjySQh5lQZYsopmrekbigpE5s+xiSdf5DbNMP6SngPHKcZr3t5Fd0Hv0fHPBiuJfa7eCcpLju7qQJ16e'
+              b'ciL7kt8wi0H8wuqMPP4YXh+PnRSDKTNy+9P7NPmWHL1+uxwE8ORUYPsZbPumHG6oFKwwHOElu+VoTySnXsxhE/1cW55ZqrHfGTX4'
+              b'5bHiCOff/YrxVtSo4j4o22YHvROWlc+uAMHVhl9FMkUDHKp5FoZqBbYbs79Sq9G35IYLM+xww5jaq5UG/nNcp//grnHUf7y0xYUh'
+              b'wivJ4CM3XGk1VWalSRJvI7MApBgflJ/j30r+LZEyJjLuGR8Z9/Lxj7XDi5afG/eyTHLG/Z5vLSx7tsdpCO9sPansVdIR3vEdNzrB'
+              b'0c2ucjA7lb26UizQOwVbdq+vPN0F8n+U6mJGbwhM33awhxKCJheld1ns0YC/MIc9e0ezKoUJ4xsZB7cjofScNUa+Zd0jUBOS0cdv'
+              b'9NCefmx44hpfs+42KbSI8uQzxiznxMoTTpzInbTJsIS0kJ15v1rAX3PTcMszTxWbhEbwf6y1tI/PfNi7Nhd6ebVfxQSWPEJEQuiS'
+              b'+AdZVAjDhseTQUGcLUTrObySxGcUOD+eDuJgbSxdazH0ljQZFG8vaCidcBcYcqoKfx3U6D+12iH+k2apKeDuKzxgUU083qlaukJq'
+              b'5OmYC38pT/IBCbfNs4MNByo9/UPDdElXfqiIn0H5RmLpsY1ZlGHHwDvqGIRWr0ePVsdCGkAKx5uiVVkjqTkJymlYEB1eVMFw/nhT'
+              b'AmlOj3Eiikf0qdMl581BMwPhPEzZWZVnE3LV6lBksSXmUKX6XtTy3LQzTrMcqFWhMxsg0Gu+J88qtQ+sZZQjwab6c1J5wPiYVWaz'
+              b'+09v9tfWR95scptgXZO1pzf5W481Sa6frUpqyhsVtq3KHZSZKNWfjlLzbMBHIW2MrB+Lg6c3fAMUdw7/teG/dzT9QNJRr6Y88mrC'
+              b'8a6KVlcmkq9+Akncwny2ImdN+m+AZLQjqKb2HzLROPwJNC6QPy/7u/V6XQM2iQXTZjb3+unN9X/rYacHvTbts8xNxLYXZZ/CHbZM'
+              b'zLTK01EbaBSzKkcs6WyLXkTutywctJ9gGUThN/jvlP9ATBLGtyoY3eH3UeJ7aDpno/kTYvXmbbPfQgwRQWF39VnGNqYqbjRmFczG'
+              b'OEciS3Qxvt+ZPBX8vtketDuX5KLbI/SoTPYFeyxCzbLpkRnDnY1Vfu4Lft+LuhRX6KFUI/wpGCszT2eaECr8w9ncGRlzWb6/mafI'
+              b'7/acebsnN/1r1FLhnyGeBJAW+J2X+H0oK/D7KU31DbYLV3dxPIbdiwshHf/CCHAtn0Nbvathr3XVwoIqf76+OI8/9gf94W2nf9M6'
+              b'y77UJSyaqNk7+3g2PFS14+Pz6+bw7G2z02ldDS/bF4oUJ5gGmyOWWzw22nz6Z560CN4lPuS7MEwl73ZaoOMNFPkVeqiyhhYYKsqZ'
+              b'R1qCA0GN2LmWxDtxPgsp+FjoHSi2nJ7u4eeQZUwD7JMaPU0qGbSohj9iTSrw8Gt7MIRlqHs2vO23eqe3FxctMXCrb03bMJK95bhc'
+              b'SQc0/mqaS+ao6FfpYXYY0tXcpAGteK5vQkZsr3m8cvGC83BfOeWxgHauwAa5pvXLJddZVI4+9Nvd6nWzU4JRx/sY06ilq8B6kV0D'
+              b'lUFKF9xZC8/YuVTPsBzeRjGUBxfgzrYASddER4IIA55vQAeh2RzR1MPv6avvAsX4US8LAPBqP8HtGNzfnr7ouCHZUgyuGE9dLc5a'
+              b'xVvXyzLXCW9Gr8jsyKSUPW21Blc0W1yL7ILFRFqdy3YnOwcJz5RUpdb2Pp78pjkqMW83EFO/pBbIJCEBy8+r8/vkjyvyYxHZ6b1p'
+              b'Kkpqt8TAKLJDD1EHXr/mV6Q/DeUfsk7EE37Etx+lvYkw1VfeKHBNSkomR+dEzxgeQhDM0nVmQH9eudQ/a3bIdbPfh6npDkpS0NSL'
+              b'h4e/+JXzwZVTSiOOHlIaZnsvZ8AoNn05GFZyUZQiWdkYyx8FcMfBDVMS/VIExg/JcWLqVQ94LH08LsoGxRlVkw1Y7Cr5k4wRlVHc'
+              b'7Y0Spr8pB792Aki7mvIs+N0oCJGGEkhg5oIqyB5sy9xELXO4NHDBKcvFQyZrPX9O1g0TFaR4uDUraXWkRmIKdFjtohupsFoga/A3'
+              b'zWOC/yupnBqlVMUx+hTlN8Lk4mr6NdDrm9LL0lGplMX6HCWWWpQ/nCTuZKV4KQmBsqtV6jJ4AeVJEcli2yT30dY2YLyMaMYE6OiO'
+              b'NwY9o2zUZGxTMKxbSDjFGLz6dAanaZlGePLXdKljfVOO38/geBk7E1nSOFkmuR2tqjzT9hu/FObqDUAXhxzEwUgXvZ/MpJcczU2X'
+              b'WzEvYqFlPZ0LlSaqzZ/xnBQ8ivRe0N3d9URT24RoZOnQZDnSdqQZpGC6Ze83Ia3CCPxUWwWIbf8/T2yyjIObEFss49t/lNi+5S69'
+              b'6N0rs/in7yxm6XsUiaboevY3+SnnxOZkntaVOX2yoQdz1bLTaXBko415bTSyQ3r4F0/siwacR/rGvfkSbVVCb7No8Jgy8fwfHmyB'
+              b'fvjOCmZsIgkxKzaALN4uYwT5xzUULhPklUamHEymn2Q9pzmGwYwKEwLLVZKn89LGk3NujlazXczmQbgr0qPnXp0FakF4GMpZUGfF'
+              b'0nSpJxyPS9HcIGLym2LbgZKwbVk/xD2b7DLi5k12yWg3IbtMbIMhu1B0yGFXyy3DTzisKWVN1pWQnG2QRoRnFxmtL2Ksa2ZU8IwF'
+              b'p6ye6fGEVuxsFTt/hvmT6FE2ClN2dm5l25Y9k+mZwfE0PJuHxzGsB9Ojp9/0CrufMT6JGKXK+iwXGkXzxhfe6Y+TWVmeWzY4FJj+'
+              b'GIV1bLL0yFMNfsv0yWA6wf10+sH1kR5KI0fdy1/2nmS+b3w35S//B07JPek='
+          )
+          with open('pce-only/pce_only.c', 'wb') as output:
+              output.write(zlib.decompress(base64.b64decode(encoded)))
+          PY_FRONTEND_DECODE
           cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
           EE_BIN = PCE-Fast-Only-PS2.ELF
           EE_OBJS = pce_only.o usbd.o usbhdfsd.o iomanx.o filexio.o audsrv.o $(PCE_OPTIONAL_OBJS)
           EE_CFLAGS += -O3 -G0 -Wall -fomit-frame-pointer -funroll-loops -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ -include $(PS2_NEWLIB_SYS_TYPES)
-          EE_LDFLAGS += -L$(GSKIT)/lib -L$(PS2SDK)/ports/lib
+          EE_CFLAGS += -I$(GSKIT_INCLUDE) -I$(LIBRETRO_INC) -I$(PCE_AUDSRV_INC)
+          EE_LDFLAGS += -L$(GSKIT_LIBDIR) -L$(DMAKIT_LIBDIR) -L$(PS2SDK)/ports/lib
           EE_LIBS += $(PCE_RAW_LIB) $(PCE_AUDSRV_LIB) $(PCE_VORBIS_LIBS) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
           all: $(EE_BIN)
           clean:
@@ -1017,7 +290,6 @@ jobs:
           PCE_FRONTEND_MAKE
           test -s pce-only/pce_only.c
           test -s pce-only/Makefile
-
       - name: Locate PS2SDK audsrv audio library and IOP module
         shell: sh
         run: |
@@ -1035,7 +307,6 @@ jobs:
           echo "Found audsrv header: $HEADER"
           echo "Found audsrv library: $LIB"
           echo "Embedded audsrv IRX: $IRX"
-
       - name: Embed USB IRX drivers
         shell: sh
         run: |
@@ -1046,7 +317,6 @@ jobs:
           bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
           bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
           bin2c audsrv.irx audsrv.c audsrv_irx
-
       - name: Locate or build PS2 MIPS static zlib
         shell: sh
         run: |
@@ -1094,7 +364,6 @@ jobs:
           }
           printf '%s\n' "$ZLIB_LIB" > pce-zlib-path.txt
           ls -lh "$ZLIB_LIB"
-
       - name: Find native PS2 Vorbis libraries or disable CD-track decoding
         shell: sh
         run: |
@@ -1113,6 +382,9 @@ jobs:
             echo 'vorbisfile/native' > pce-vorbis-mode.txt
           else
             cat > pce-only/vorbis_no_cd.c <<'PCE_NO_CD_VORBIS_C'
+          /* Cartridge-only experimental build: Ogg CD audio deliberately disabled.
+             These entrypoints are referenced by Mednafen's CD audioreader but
+             must never be used for .pce cartridge games. Always report failure. */
           #include <stddef.h>
           int ov_open_callbacks(void *src, void *vf, const char *initial,
                                 long ibytes, void *callbacks) {
@@ -1138,7 +410,6 @@ jobs:
             echo 'No PS2 Vorbis libraries: CD Ogg disabled; .pce cartridges unaffected.'
           fi
           cat pce-vorbis-mode.txt
-
       - name: Compile independent PCE-only PS2 ELF
         shell: sh
         run: |
@@ -1155,10 +426,28 @@ jobs:
           AUDSRV_INC="$(cat pce-audsrv-include.txt)"
           AUDSRV_LIB="$(cat pce-audsrv-lib.txt)"
           test -s "$ZLIB_LIB" || { echo 'Missing PS2 zlib static library'; exit 1; }
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          GSKIT_HEADER="$(find "$PS2_ROOT" -type f -name gsKit.h -print -quit 2>/dev/null || true)"
+          test -n "$GSKIT_HEADER" && test -s "$GSKIT_HEADER" || {
+            echo 'gsKit.h not found in PS2DEV. The ps2dev image is missing gsKit headers.'; exit 1;
+          }
+          GSKIT_INCLUDE="$(dirname "$GSKIT_HEADER")"
+          GSKIT_LIB="$(find "$PS2_ROOT" -type f -name libgskit.a -print -quit 2>/dev/null || true)"
+          DMAKIT_LIB="$(find "$PS2_ROOT" -type f -name libdmakit.a -print -quit 2>/dev/null || true)"
+          test -n "$GSKIT_LIB" && test -s "$GSKIT_LIB" || {
+            echo 'libgskit.a not found in PS2DEV.'; exit 1;
+          }
+          test -n "$DMAKIT_LIB" && test -s "$DMAKIT_LIB" || {
+            echo 'libdmakit.a not found in PS2DEV.'; exit 1;
+          }
+          GSKIT_LIBDIR="$(dirname "$GSKIT_LIB")"
+          DMAKIT_LIBDIR="$(dirname "$DMAKIT_LIB")"
           echo "Libretro include: $LIBRETRO_INC"
+          echo "gsKit include: $GSKIT_INCLUDE"
+          echo "gsKit library directory: $GSKIT_LIBDIR"
+          echo "dmaKit library directory: $DMAKIT_LIBDIR"
           echo "MIPS zlib library: $ZLIB_LIB"
           echo "Vorbis mode: $(cat pce-vorbis-mode.txt)"
-          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
           SYS_TYPES_HEADER="$PS2_ROOT/ee/mips64r5900el-ps2-elf/include/sys/types.h"
           if [ ! -s "$SYS_TYPES_HEADER" ]; then
             SYS_TYPES_HEADER="$(find "$PS2_ROOT/ee" -path '*/mips64r5900el-ps2-elf/include/sys/types.h' -type f -print -quit 2>/dev/null || true)"
@@ -1175,7 +464,7 @@ jobs:
           if mips64r5900el-ps2-elf-gcc -D_EE -DNEWLIB_PORT_AWARE \
             -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ \
             -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" \
-            -I"$GSKIT/include" -I"$LIBRETRO_INC" -I"$AUDSRV_INC" \
+            -I"$GSKIT_INCLUDE" -I"$LIBRETRO_INC" -I"$AUDSRV_INC" \
             -include "$SYS_TYPES_HEADER" -fsyntax-only pce-only/ps2_types_probe.c; then
             echo 'PS2 newlib type preflight passed.'
           else
@@ -1184,6 +473,8 @@ jobs:
           fi
           if make -C pce-only -j2 \
             PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" \
+            GSKIT_INCLUDE="$GSKIT_INCLUDE" GSKIT_LIBDIR="$GSKIT_LIBDIR" \
+            DMAKIT_LIBDIR="$DMAKIT_LIBDIR" \
             PCE_ZLIB_LIB="$ZLIB_LIB" PCE_VORBIS_LIBS="$VORBIS_LIBS" \
             PCE_AUDSRV_INC="$AUDSRV_INC" PCE_AUDSRV_LIB="$AUDSRV_LIB" \
             PCE_OPTIONAL_OBJS="$OPTIONAL_OBJS" PS2_NEWLIB_SYS_TYPES="$SYS_TYPES_HEADER" > frontend-build.log 2>&1; then
@@ -1194,7 +485,6 @@ jobs:
           fi
           test -s pce-only/PCE-Fast-Only-PS2.ELF
           ls -lh pce-only/PCE-Fast-Only-PS2.ELF
-
       - name: Verify ELF and separate core source
         shell: sh
         run: |
@@ -1209,7 +499,6 @@ jobs:
           assert struct.unpack_from('<H',b,18)[0] == 8, 'Not MIPS'
           print('ELF header validated; gameplay still requires a PS2 test.')
           PY_CHECK
-
       - name: Collect build outputs and diagnostics (always)
         if: always()
         shell: sh
@@ -1250,12 +539,11 @@ jobs:
             printf 'ELF build output: NOT GENERATED; inspect build logs and workflow steps.\n' > artifact-staging/ELF-STATUS.txt
           fi
           find artifact-staging -type f -print
-
       - name: Upload ELF, source, and diagnostics (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2.4-Save-Load-State-5-Slots
+          name: PCE-Fast-PS2-V12.2.4-Splatterhouse-Cheats-Save-Load-State
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
