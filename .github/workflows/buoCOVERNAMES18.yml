@@ -20,8 +20,10 @@ jobs:
           set -eu
           mkdir -p artifact-staging
           printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
-          printf 'Variant V4: keeps the V3 cover/ZIP frontend and displays Splatterhouse as 'Splatterhouse (Japan) [PCE]' or 'Splatterhouse (Japan) [ZIP]'; other ROM entries receive [PCE] or [ZIP] suffixes. Actual filenames, cover lookup, ZIP/exFAT/Turbo/SaveLoad/RAM-cheat behavior are preserved.\n' >> artifact-staging/workflow-status.txt
-          printf 'ZIP debug: browser lists .pce and .zip; ZIP must contain a .pce member, be single-disk and non-encrypted, and use stored or DEFLATE compression. ZIP and extracted ROM are limited to 8 MiB. If the core requires a full path, extracted ROM is written to a unique temporary .PCE in the same USB folder. PNG cover support: look for 200x200 8-bit non-interlaced RGB/RGBA/indexed PNGs in mass:/images/ or mass0:/images/, with a current-folder images/ fallback; filename must match the game filename without .pce/.zip. Browser hides images/ and displays titles only on the left and the cover on the right.\n' >> artifact-staging/workflow-status.txt
+          cat >> artifact-staging/workflow-status.txt <<'STATUS'
+          Variant V4: keeps the V3 cover/ZIP frontend and displays Splatterhouse as "Splatterhouse (Japan) [PCE]" or "Splatterhouse (Japan) [ZIP]"; other ROM entries receive [PCE] or [ZIP] suffixes. Actual filenames, cover lookup, ZIP/exFAT/Turbo/SaveLoad/RAM-cheat behavior are preserved.
+          ZIP debug: browser lists .pce and .zip; ZIP must contain a .pce member, be single-disk and non-encrypted, and use stored or DEFLATE compression. ZIP and extracted ROM are limited to 8 MiB. If the core requires a full path, extracted ROM is written to a unique temporary .PCE in the same USB folder. PNG cover support: look for 200x200 8-bit non-interlaced RGB/RGBA/indexed PNGs in mass:/images/ or mass0:/images/, with a current-folder images/ fallback; filename must match the game filename without .pce/.zip. Browser hides images/ and displays titles only on the left and the cover on the right.
+          STATUS
       - name: Checkout workflow repository
         uses: actions/checkout@v4
       - name: Install tools
