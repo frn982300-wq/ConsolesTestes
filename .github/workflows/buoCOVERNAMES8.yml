@@ -1,0 +1,705 @@
+name: PCE Fast PS2 V12.2.4 - Game Covers + PCE ZIP Display Names V4
+'on':
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    name: DEBUG V4 Build PCE Fast V12.2.4 Game Covers + PCE ZIP Display Names ELF
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: ps2dev/ps2dev:latest
+    steps:
+      - name: Initialize artifact staging (always available)
+        shell: sh
+        run: |
+          set -eu
+          mkdir -p artifact-staging
+          printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
+          printf 'Variant V4: keeps the V3 cover/ZIP frontend and displays Splatterhouse as 'Splatterhouse (Japan) [PCE]' or 'Splatterhouse (Japan) [ZIP]'; other ROM entries receive [PCE] or [ZIP] suffixes. Actual filenames, cover lookup, ZIP/exFAT/Turbo/SaveLoad/RAM-cheat behavior are preserved.\n' >> artifact-staging/workflow-status.txt
+          printf 'ZIP debug: browser lists .pce and .zip; ZIP must contain a .pce member, be single-disk and non-encrypted, and use stored or DEFLATE compression. ZIP and extracted ROM are limited to 8 MiB. If the core requires a full path, extracted ROM is written to a unique temporary .PCE in the same USB folder. PNG cover support: look for 200x200 8-bit non-interlaced RGB/RGBA/indexed PNGs in mass:/images/ or mass0:/images/, with a current-folder images/ fallback; filename must match the game filename without .pce/.zip. Browser hides images/ and displays titles only on the left and the cover on the right.\n' >> artifact-staging/workflow-status.txt
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+      - name: Install tools
+        shell: sh
+        run: |
+          set -eu
+          apk add --no-cache git make python3 build-base unzip binutils
+      - name: Fetch tested PS2 PCE Fast integration
+        shell: sh
+        run: |
+          set -eu
+          git clone --depth 1 https://github.com/itsveenee/SNESticleAurora.git aurora
+          git -C aurora submodule update --init --depth 1 src/third_party/beetle-pce-fast
+          test -s aurora/Makefile
+          test -s aurora/tools/Makefile.beetle-pce-fast-ps2
+          test -s aurora/src/third_party/beetle-pce-fast/libretro.c
+          git -C aurora rev-parse HEAD > aurora-revision.txt
+      - name: Verify Aurora GS-native color layout
+        shell: sh
+        run: |
+          set -eu
+          VIDEO_HEADER=aurora/src/third_party/beetle-pce-fast/mednafen/video.h
+          CORE_MAKEFILE=aurora/tools/Makefile.beetle-pce-fast-ps2
+          test -s "$VIDEO_HEADER" || { echo 'PCE video.h not found'; exit 1; }
+          grep -q 'AURORA_PS2_PCE_FAST' "$VIDEO_HEADER" || { echo 'Expected Aurora PS2 color path not found'; exit 1; }
+          grep -q 'RED_SHIFT   0' "$VIDEO_HEADER" || { echo 'Expected GS-native red bit layout not found'; exit 1; }
+          grep -q 'GREEN_SHIFT 5' "$VIDEO_HEADER" || { echo 'Expected GS-native green bit layout not found'; exit 1; }
+          grep -q 'BLUE_SHIFT  10' "$VIDEO_HEADER" || { echo 'Expected GS-native blue bit layout not found'; exit 1; }
+          grep -q '0x8000u' "$VIDEO_HEADER" || { echo 'Expected opaque alpha bit for GS CT16 not found'; exit 1; }
+          grep -q -- '-DAURORA_PS2_PCE_FAST=1' "$CORE_MAKEFILE" || { echo 'Aurora PS2 core define missing'; exit 1; }
+          echo 'Verified: source pixels are opaque GS-native A1B5G5R5; direct CT16 upload path is valid.'
+      - name: Build ONLY the original PC Engine core archive
+        shell: sh
+        run: |
+          set -eu
+          BASE="$(pwd)/aurora"
+          TARGET="$BASE/build/pce/beetle_pce_fast_libretro_ps2.a"
+          echo "Building PCE library: $TARGET"
+          if make -C aurora -j2 "$TARGET" > core-build.log 2>&1; then
+            echo 'Original Aurora PCE core build completed.'
+          else
+            echo 'Failed to build the isolated Aurora PCE core.'
+            tail -n 150 core-build.log
+            exit 1
+          fi
+          RAW="$BASE/build/beetle-pce-fast-src/mednafen_pce_fast_libretro_ps2_raw.a"
+          test -s "$RAW" || { echo 'Raw PCE archive was not produced'; exit 1; }
+          mips64r5900el-ps2-elf-nm -g --defined-only "$RAW" > pce-symbols.txt
+          grep -Eq '[[:space:]]retro_run$' pce-symbols.txt || {
+            echo 'Raw archive does not export the expected Libretro API.'
+            exit 1
+          }
+          for symbol in retro_serialize_size retro_serialize retro_unserialize retro_get_memory_data retro_get_memory_size; do
+            grep -Eq "[[:space:]]${symbol}$" pce-symbols.txt || {
+              echo "Required Libretro API missing from core: ${symbol}"
+              exit 1
+            }
+          done
+          echo 'Verified: retro_run, Save/Load State APIs, and safe system-RAM access APIs; frontend avoids retro_cheat_reset/set.'
+          echo 'Save State test: open menu with L1+R1+SELECT; D-pad moves; Cross confirms; Circle returns. Test all five slots on USB exFAT.'
+      - name: Extract the tested V10/V11 exFAT driver pair
+        shell: sh
+        run: |
+          set -eu
+          mkdir -p pce-only
+          test -s FCEUmm-PS2-exFAT-integrated-2026.zip || {
+            echo 'Missing FCEUmm-PS2-exFAT-integrated-2026.zip in repository root.'
+            echo 'Add the same driver archive used by the working V10/V11 workflow.'
+            exit 1
+          }
+          unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
+            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbd.irx \
+            > pce-only/usbd.irx
+          unzip -p FCEUmm-PS2-exFAT-integrated-2026.zip \
+            FCEUmm-PS2-exFAT/src/drivers/ps2/irx/exfat/usbhdfsd.irx \
+            > pce-only/usbhdfsd.irx
+          test -s pce-only/usbd.irx
+          test -s pce-only/usbhdfsd.irx
+          test -s "$PS2SDK/iop/irx/iomanX.irx"
+          test -s "$PS2SDK/iop/irx/fileXio.irx"
+          echo 'Extracted tested V10/V11 exFAT pair: usbd.irx + usbhdfsd.irx.'
+      - name: Generate PS2-only Libretro frontend
+        shell: sh
+        run: |
+          set -eu
+          mkdir -p pce-only
+          python3 - <<'PY_FRONTEND_DECODE'
+          import base64, zlib
+          encoded = (
+              b'eNrVfW1b40ay6P168ysE+2RigWAsY14GI+bxgJnxCWDWNpNJ5nL9yLYAJcb2SjYDSeb89ltV/aJuqSXbTLJ7bs5ZxpKqq6urq6ur'
+              b'u6urLEv893rjOyv5b8O6OmlYZ348s646FWvLCp6mQRQ+BOOZP7LicHw3CrYGkyiwzsN+FMyiiXUbTcazYDzc1vG88+NgaE3G1uw+'
+              b'sN4FwWwUJLhHojChmiNk/9nqXDY6s3AAgPV5NIn8FMbufRjL2iz4PQ6+1Ag9YYEX/Xk4miHIgxXOYmsShXfhGOmezKNBkEJ3ObHa'
+              b'rQsAsm7D6OGLDyj68/FwFAy3res4iAnzNAoew8k8Hj1bsyCeAZ0f3fLrj64LjDmrd61hFD4GkTX1wyiN3p/BJ+IitPZxEvXD+DaE'
+              b'tk2ms3ACVNWsW3806vuD36x4Pp1OIqB44EezKBzeQe2T8ehZR/laeXoNHdXqND9Zs+cpACPxiGQUAoWz+2gyv7sn+qH7RuEgZL05'
+              b'm0xGg3s/HCPngCjrPvCHQD28aDR6J2fn9fedbb2ef4TjwWg+DKyju/jHcLZ9f2z8OHzwC75CVVN/mPc1Dm+j6SC37MQfIttyS/cf'
+              b'e1N/NrgP4jyQcDKFhk7zPiP2T+GkV0AEfB1MHh4m43yAp14884s4QPKe992fD+PoMbeNs2E4KfgI2PO/RjBm874OUHqKah3ntuj3'
+              b'TKUgkp3JA0l85/TH15qIxdZwYo0nM5THSQyyOp4CXbNbCwYcCCCN4XkUgZZRJd6ybgN/NgfZfvAH0STetk6DwQhlHUc38Hs89KMh'
+              b'aKW7MQMT0g4jRxfj4GkWRGMQ9JmsugQjIbI2gEEOYPg96M3oHweUyRg0FPt6O4ke/JljbW9v27XvVEYMg9twHFgX9U+9s+Z5o2O5'
+              b'lYOc71f17gdr160YPoMC6p03L5pdq3QwB6XhlitV+a9tKNBtfOp1mr80UviA96ehfzeexKA/rQmopJH/jM0FjpKyAf0VjP0+KDcL'
+              b'2gQMB22JCq1mDcMY31v+7Qx7AlQHPMX3k8kMBSelDTgVoMd7nQ+tn3qnzfr7y1an2zwBBnyXZfh8jJ0DlRI753F/2Aujp883Dv6+'
+              b'H97G8jmcPPjjJ/GEY/IJRh1/ZMODPdUKaqH+xb4UNTnyUVbGXyX18RdKlfxNUqvW9ThmgA8gf9F8MLP+YG0b+w/B58ru3k2NqBiG'
+              b'Uc36ajXGs+hZpRiVBPQQvYcegdEZxJ+lEN0YQBHbmEMCYcEoGMA0BL8GURCMHQKbx6CfhoGhNNF2OxnBKPssZPHG8qz1Bz+OD1+v'
+              b'5xW5g+agXr1PShWC4gychkep3J4OYPQGD/2AsYik75fmVVyTs74wJLYzMxzAgZA+wNToA7cQuwVDHngrJf02DEbDWKJCPYITxtYw'
+              b'6M/vxDhIIVZp/z2c9rCGJZs6AttlZfhHfxQOeyiqIKagW5iUFJUA+6VH8rSwAmI7lRlN7j67byomSDk8RpPxXVIDyngRtE4P6vHP'
+              b'B3kCSmDjIBj2buejEfWUZ225C9FvkPAM/ZlvAOVamUByiCUkYFv0+vNb4qvV6/kzGCv9+Szo9Uol4D3WVtqr2rZtqoMNYkDxbj6b'
+              b'TcYdGk2EMhzfTooagO3uU6G4N558ceQD2ozJUwDWXE2X6w8wHrdmky2wOwMLJq7+5NDy+5P5zHJ3rel8BMbn6ziAeWho+TMSamk4'
+              b'//de2frwO5i4OJYifxYUaOjudftdq3fVaDdbp72zdv0CZqnqvBC4dSkAK/MFTSe6eyGM/DlMMzCJ8hfyTY6oiHL+AO1jpRh7kWJV'
+              b'FxovTX5/+OiPB2DudrEMWMigW2B1YgUP85GPtjmxZdtq3spVgW5O+KMYlhwwG8ZAynQ+600no1HJdgj8bo7GBHYeaFswqS3RBaxW'
+              b'sxZJWjSfDpGGHk6tPSLExACwE2FqgAp6NEfgDxDdVaVWmJtos+A/L0Chj8MIRjcOIXdv56C6/CBCk2+Gay/B7h9gUcbWPe87YAhe'
+              b'nHTdPWsaPgXAcWzuAEyzQ+veH7EegolhApodlfp8iorb6sPvL+EQ9Mfk1jrp7lTMbJ8D3909aD7D7e59lobRhrSRVlYG7ztQFAZC'
+              b'A2YdmPOhdZVy+Qn+Z11dvof2PaIhi+YnI5YNhAlJytTHwWiBCnqC/8mmAx40TKkRYrSdtD422j1JL4CnPkFlPdT8737uwkAsVQyG'
+              b'YZoNRFuPMeNzqoKNVI2L2JJhBkNOLMnKH/u4pBQqg0Yi7aHsPTv8BeOreAqiaBLJYnzGww+/Bc/q5JgFIAPg85s9snUuW4wF1smH'
+              b'xsmP68aef3/eelc/hwkpztFbj+EwgEViMAhAvIFC9kwDXYx9h4ljj60aoOZ2o9sGDdz81DjvnbXaF/Vur9x+/87d3d0tGpIM6RdA'
+              b'AMLh8EecUSuVag51ZAiE43AWAst/ZxxE04DYmVMGrGK9CCyUcfICWc4tgxMjdVhKDVxNotnWZBqMuT1K2zOw3ptGExjI8P8jVAqk'
+              b'dPMVqUDem/zm0AN+C9CAmgdkTzgJyCgYL5qcCdb/0uMzMWAoP93Cf/OCtiE/oIJ4PpqxyrBN/EVNWwjfGldBC0hisw6b6XpggkM7'
+              b'2at/zYPomd7UlkKBkLwQTbfLlcLpjsGLehmH81AkJcnAwz0q3g/K22HwGA6CPHsvhSIcZhFQ/y7XAJ/aTCsh9qIvXhRW7bM6kkKZ'
+              b'Kv8B9kV4a8YB60BYFz5MhvNRIBUUexlNB0J/8RfqA1df+Q3jZXDm8Kxq1S2XtZUmTq8+DBvqJFrlGCZauQ8bAx9wJPu44rfqV02a'
+              b'V68776A8rKDuikzFTrfehb/nrW7H2i2EUSYmd2+pLYukLKjgTrN1abnzguW0ZrGRRn/w78JBau1h0dy3U4EZCGdlaHHOV1o93Pvx'
+              b'fc73qf+MXZpZYBhACrCkjOFiKCPYV+QTrj6CD7RjliPPbLw+BON5T2wFoF7LWxoJ8DiG/v+8V6XpcH0BbgJmM1uckccpWNpA+v0E'
+              b'pXEAq8JZzDbcUTLlFvTJhy4YSoN7ENBtqz4aIW7QHa2zs23dIkf7ft+K73HKAVmtv/4vf+qPLdzNYKYWDLY5burh/LpN4LMvE6t+'
+              b'3mUwKfseCsBg8EMcXMIoGz1b/WDg89HzTMPIB2v09jZA+9uC9Q5MULdxMCsYIGA5wOR90rq+7FputRDoonF53Wt2GxcwRNJFN62K'
+              b'XbiVpOw9QusGNe0N7fFQV/G9vBoTmxPsBkOnik/WdAA6nvrqc4oiFAh9yP1hrTcvz5qX0AIL4NqgEaBf1h1r3b0t+9XhYXkXHsrW'
+              b'Vye32HnzY0MtNbytLlEKptLu++tLtbbdymH5ILfcx+blSfPdeQNLWP9Vv6pf8nKV3d1Dt5pT7kP9I9TVrb9vWD816lety0zxQbWf'
+              b'T65rfWh2rdPWNVZ88qHevOzUf8qg8HcHh+VyIYqz85+bsKq4qHd+7GTL77mLyv/UuqhfWu9aHUPp3WBR6W670bDarVbXUNhfSHrz'
+              b'EkzlnKqH+aUbl3Xk2od6+9S6aJ02kq52y3vQ1W5OOeittqiV9ZxaZbkSHLr7i6Srcdlov/8ZFQevsVIkykIW6xcXLbWMIpCq7s4z'
+              b'ynHILaWsHydgGDH9C3pI6OCSOvj5O/0YQuj6BA7/xJ9Jz9ffnZw2zt5/aP7Xj+cXl62rf7Y73euPP336+ZeyW9mp7u7tH7zZen24'
+              b'3SvZxn1gQpraPMQ/d6Pn6T2rQ1cd5afq3o57O9irBNfn5075aSfYcffh8ZY97h9U3PJBdUf5eqB8HVTcffhKjym85aryDUr6O26Q'
+              b'IOK17rgC0QGAl99wYPdN5Q08uwMD3upuZdd9s5uUJAIrboLXH+7vK4+D4Z54RCIORFtN9CZN232zs3uQsAVrVb7uBG55vyxbwyjg'
+              b'5Kfw8joFva67qz5W9/d3feVxr+JXKr4ERrziMYUXGo7/uQl/d/wg6cYDomhQFVyqwn+VpJOB/GqlbKIX2H5b9d8cHCigejfCo0BE'
+              b'9GlEuPtVM393fLd8W5UEluG/2wP4wx+rrDXiERCXofX8EThWpv9M/Sb+S/Au97hAG9D4Hvn9YFRCxfDk4N9n+hsP/FHgqCM9dtBi'
+              b'3KvS7spoEtmpYUbrGidyBs6vuqF5O4lKoVeuxZ/Dm1q4uZkuaAkV4dHhpz2bgL0WRKWSthloY3G7lipp0AP9cBZ75TQgEvErvGaK'
+              b'6Neb2q9ISMjOW/GF5w3ugTIqzVUJQMEixv+t9tWALAJk0dF+LUI8+GKA2I92awOOGDG9KqFYW0dHVina2N0c2Ha28YAO7Hjg/pNX'
+              b'ol926WmzFG7sAfgGdYPtWM/P8uPzZsRf1zKYyBuiN43Ch14Mf2dB6S52np6c52f4u8n69PmZ/3Ad1o9pNHprtRklR4Rm4QzWoOzo'
+              b'T5sd4nmfvqVbLSWpf+e97/Q6DZj43/fa79/V/1lyK06l7OzsgigflJ2yXTOX/HIPzcsUruyUnUoV/7eovP+vuZ8pvgsl3bLj7ueU'
+              b'ZvwdjAI/Qs7271Lf2ViCuqsHzo6zTucj9U4XnQ/WHaI4r8CbN07FEexykDgNMo/zUXAbBfG94D2+A15zOv81D+ZBL3gKBkCsXeNv'
+              b'4+fxoHc7CqfsZR5m2uga+BJnZqzHjpVa3aonTZ5yBqVDKdtp6WGqbqOlv8GIWpPbfNlRlNqX87bcWnqnzTPss6lkA6VQqXZChs+w'
+              b'cptHqZbqQyT2oKb3wYzWyaWs1KRpizMti9e8q/qp2O/okj366pWlvQaL8fSke+Wa2/7vaOfYw2nChura0AnYUOeVOJK0C3pynGnv'
+              b'+Mgr/+faoUqga6BbIaGk7vbZorHb/dk4tl5ZRgJV8kr/nUJoLypFrVBQAPx/q+NqgVKgU2/cFXqYDGnkWhv+cAgqAmZvdd8SusU0'
+              b'ptmOsld2rHDodcLbBuiOC9phfDfHjYmSQAblofcv0eJ4xQqlBID1glUKh0dl+204PCyVGBw+sl+H5aVUHJ4HTKPJHdarTy4zXHik'
+              b'WqFNResf3YrV+IQekfXr02Zr3ah9dyuk9EH9IkJn8ZyQaaqmg+0lukicceQq1ygzZFLHIjZncEpLasxaxzWm1WmeWa+tZusq3Xro'
+              b'33MQlbNwFDSRFpgM4BX+bE6mHwJ/im+kI2OPbe70Rg99fK8eyqQHkU7Eeat+CtVf1C8/pSmIPCmriuNTyhEKK7stRSA3vMnRwtrQ'
+              b'a+lTtruV6lS3qrSf1WoVEo9zK+RenIK/qzaEye51591pQVukV5nmY/bi2j6cnnUWVJd4rWX82JapVhHjYtFhBJ22m7hFb7Ub9dOf'
+              b'1816przEoGPHGjTspC6MAjCS0IGajjuWGIl8T5Q74d0+4GEz/M0MV+XcxbbMYxUtGnUYZSfEv22Efs0QYjhNytLzesM6b77rnOIx'
+              b'Kvn/dCqoWNCRHR3gmNM5sjSMmOcbdyDWN7DxP6b4ePvYDFNajyYP5UOqYJ1PLpm1iSKHiR+kk/KLzJTiEgmGsXIC5kXCVrCimpVe'
+              b'4hn4sSwT5elbloGRJ6hk3flX0SmrLKYRBHUb5qp/MTuupAu/9TY1GqxDdviXIhOR0CrZ3avRA8zG43Ewir1KWmfwxuLeIXM+KL2C'
+              b'AnZmGECj0dwV5K15rF7gg6SYHUMW4Mx2RwZrpVLe1bHSm5WxrtBBGubHyWj+EJTelI0cWAFrckCbGKi2aFTNBMplQ6ug/CJNKlXn'
+              b'OHjCs/cvlUSbPmbW+RI4LZiwGIYhPz56xC4aHwkvIHt8dJQG5YSNl1Dx936cuLT2BqFmL6Lvqu5HL0HTdGsHXpOUducOoNlVzRq5'
+              b'Ev/5p7WmIDbrfkDqwVQSDe6jEtH1w/YPWalYA7A8DGMsD2Z4Kakru6xkEIhlzculhXVFPjMI1WwymnzJbsohd3C/a82z8iAkXoCz'
+              b'MztWZpK+mgTAXUIAQlglDYJMt+PY4lgyIkLsX0eP8HXzdgjH+3s4fQleKFaAd/Aw7aEX/TNHzZZsU9/RHvtm+WTu+hu+V9KeYZnq'
+              b'bPQzL/tZG2XreBhG2Hd9+iUFhD1use96sYxoIHNMm6244xseVXb3zFu+rOTA93LEBuomX3PDni8v2s8r2i8selsa+GveoC/s04G/'
+              b'Negb4dYGfs4qy8pMw4vFOEcAcIsNfW9zV4JDsYY4RZ+vErs0YTupbhFXMXADRBzqGXbQcDEuaB1md+lrtWxHPQQPMHeVXiVuwWCb'
+              b'oQqcADr5zjZYaoJunHxKQ0fBYDZ8vLLNtttTH5Ny29Svmcrptb3l3mS3/bEbQQvCMEvDw9Bct//8M/8rfLZhCM3C8TwwoD1rtnqd'
+              b'XrNz2myrhem6HZiNoBpevcpIlZWnR9NtLN/YnvdD+MO3YXEJy8M3YqkQFv8bsewQlrtvxFIlLME3YtklLHEOljT03g0A/58yQBeI'
+              b'w9oy8mCt8fkpLbviG84x6W9FQiiG/bEnL2vlgoOgjwfT55K43iXK3jCBTw8APsoEdPlGjLLM4DUj/JyLwDBMsyiAHG8hS9+6hxlU'
+              b'm5sCSeFKiOumwWgSQ3ek2vSveBLNBOWOvOaWaZHtyPnbvC0BZv3b6LC8zDZngK53PVytj83bgsLsFHafmAmsaALG5Bp1Lygy9tqh'
+              b'm3Tlw9frzr79dv9wz7QFjwWhFrZviceZbOc8s+ThF/XG2HXeD69/sLe2xkZr/hgxvnqlwK+Z4QVERhSUa4OenBpTO6p4A2Jra0u7'
+              b'BYH+lFvkYy9urVul9vt3joV7uA7epg/Hw+AJFAJA16yDLVjBOtZ4Mt7C26jRyB/ACmqb0G68Vu8xMFfL8V2vH+xUSinnE2YITllP'
+              b'iR3vkihmT0FE8Oy3UrWtP/UPLn1w9+BD0jYNokIQB1RSeb1zU/vuq3pjAWmb+sHsno7wfYddAGP/DBhlBOb5m/2tAXqPe34/Lk23'
+              b'fBCdaZ8/9PFhwB8GxHDo+Kl/5E37qJzo10DaDr4A6GuvyY4SdlWKTjpwYbcgcPBppjTezHPSbN2YzGfyDjQ+kDNs0qLboUNSpd6S'
+              b'ntzeMolK4RJX+dgh4uyeFml4s43/y1Fz0pnHOFbp4SZULamdIRcmkX7JJDGL9Pe24CbXOfygsESNTuGwFfuMURGm0W3fh1gNUZ76'
+              b'wt9/x5cImW/Hhos8SXUVwUyvxFhqG1AgDDLTK6U4bD/4o9FkQEVFg9cQMqlgB1/fSnu2heYsMQH1fKvXPm1dnv8smTVkOyK3oJtK'
+              b'hEduh2xV2XIqYel5HAS/QRHoApozGo0f8QwHFr3ylJFDnpC+vwWFb8RM918QN1NoIE5HidAxsfvij2d8/ww/bQEM109AD348po9c'
+              b'FPgNNttWyqU+scJjwRY6WoWm8M8OlksqwINT7PrxMb2XU8RyzeOzAFPwIMVoDiDIJjRCVih6X+wnwLdNKRJjwaCE+bLO/A7bZx1G'
+              b'I4qGojKihFQlKyhNbQwDnAu44kBdBxo/Rw2P76S6QMCk48yeg8wTXQRp+Hxw4/3h7uw7B2Vn/8DZdx13x8FTwT34+zWrUqb+KJjN'
+              b'gs/7ewc3jnjq+aPpvS9vUqeu/TAQuVBLlWLe9yntRQKH9w4B/D4I7+7xbBamrt4wmNJL8uDpocO2oWT/eRaAvSmu4DEI/HA3mfXC'
+              b'+2EECOhnMIbFoiP8MQQPJ7F34ITQX1z1OdHkS49wOniiTQqXdU9yTyHVJ1iadKizAUX4L16G6VahlMd3KNai344O8AklFCwa7FjZ'
+              b'T84BG9XqgpvrY87ORA/zF0wB60CM505ldzcFzD5wnY3U5yk6KWKiCQit08WUCPARJkkOTXMp/70FX449tyJGsTQ3wLq7g96VVgf8'
+              b'2ARYPh6Nwk8SwOE2qwWApLwF4EFNrxijKuHOQW8QDRx/MJv7I/zJoLhYDO7n4996s8nMH0mtJLQDI/xYbeCWW5nbKHATazgZ80WJ'
+              b'ggPaP9/UyzMYlZaEFaStGBhnR0Kml9hJ8ATA5XPnlx7JXHkxcPLJ4frlHYj6LXQ48tYpzZuo8qtzUXuik5OSa55KdabZAMtFmlCu'
+              b'Nz+cttedKqxFFWcYABLDE8cAq23Nc3fmNEAm8Zp3kOWoxdWExijQwFxp6PyrSoM6USX4AS8zWYpGoXdv5AUn3D/CN24ZzHqahdij'
+              b'qz9WbmiAZgjE6RFpXPNAhVNjGHHJs6Qmp4lkCwnqoJI5jib1TSXzZmeuLfHVT9UM8N7CSj0PpTmtV3ekL08wioN0iaqhRKWwxJ6h'
+              b'RFUvkf7sys9St/Pt8q+yCk32rs67DZPsrTGBS0TvOKVM8UuJffp+Z26b+5rbFkIjo2A42qi1MvOh7mnFa3gNNRQ2Y9a+7JiaYaRd'
+              b'6HahYI1fzU3g80VRQ9RZXG+MqtZy2tE8rXeN3aHqgjw1K+fo/J5AkE0Jx9qho5PtkVCJ1bdMAxqXp/kdgYPVQJw0PuTRDs5KXmaK'
+              b'AUWVbAwz69UEyO1SjWdrog56kG2TyyRt4JG2sNZSommnKJdmkOQP6bWN1JgkUG4neSVZaNOd2xuiINOAtKhSDClPAhsA0Y7Ks0lE'
+              b'dbaCMRdYrVEaMYCBGMU/plrO7ZTzyfju1gILfiqM+BJ7ZwsCanK59HvkzceDycOUPHpKYk4FQOeVgiE952JHOQyrnYi3nEZ/j9a8'
+              b'X3qtH5FWBctahpBUA74mjVAN5WfniaHGQ5BnsIKfjzjDn9WzK6NBFYMtAbVJG+Z5Q+/rzUQ16yVh+TQLIiz7Oa/sjbnkxjCGdRTr'
+              b'IaVeWbRWRC85Zz+/TRcvPW+hYEoch8I6F3uARO1x1TSMkWtPwLWno4SEJ/3Qj/mc3s68p2MvNU7eQms+P22l3t6ou6bkMjn1kPS3'
+              b'+Ofzk+Fzj/CX8DuO4mxFNi+7sCoAG4aDme4iIXngwWRrKzBYbQImlKOArWiw82k+5I4GWUK0m/Op/bqSX6SqFUl2ArGsM586nCnK'
+              b'/inx+ialE+wSCDG83pS4ZImvUuV+TdZQaliX9K4Xe8us4794pIFwLSP1iTSSWk5LokZO5Nw5fcf3YB0417panRVw6lK34iPvzuuj'
+              b'jgaWJYW+Gk25SqYsldvYmYOpfScfYLDDcz95rswXoq7mk7WBxS1fPhD6Bej2ciitqpRWU5RWGaWyKnjeMVSl4k2FzxgGTxlWUg/Q'
+              b'p2MvPRdntQ8jVuzHUDHB3vRLQXzmvcbupPojg21nQ2P17R4CVRutCpJ/5FZwMaOFQkqkV4+BtPmkHYgQ75YuWBJhl+zSd+rlQbyA'
+              b'OKfzh+j4eMd+tYPqCx9Ld/L56GiXv+sr71zF1V1XBOziBPbCITMc2OYH7f3RT25PwOTG3+Iv/lLaFmyrkD8pe4CT31KbgDOKJ0N8'
+              b'8EG9pY8OmOCaNjrEJKacESS7YCDhqTMJtiVPxvEr1Sxi3nnC+ADbY8u11VhQwn5VN3+QTZFn3L6kCiR+ZcNUGGE2xVxQ0SeopZWb'
+              b'ClW1sAy7/cVDf/VYrDC8xPZKIiIC1IBXrF2J+5XsFDqxHKOjJHpx92T0K61rKKqNwx/Uw5yBz4/M6BMGrpRbpll/vQ2aMjVXPHES'
+              b'6lCETd6hwBFxoEP4k2tA8Ppz+YaO8OVeHZKmwmBd0iGPEY4Hl/IT/nmLfzbdQ/pMdPATdWyBox6a4wtxUk7N098ntKhugIRFuAHi'
+              b'MMHDWWyyhGb7iYSwfIM2ThjHU38QpN0dOAT3toNJ+wH6h+HHP5uuw4+QiR7WSE99lVQ2XlQNHvLCAol+b22Nk6a93qA45sP5wzS2'
+              b'JrezAF3kHjHGyQjENRzfWetta9168KPfKNSyz4Ov0VEGMhNKPYQi+AluMvJmed4P7R+wn5PnSPHkYGB0Um0lYPTcSz3/n9kP8j5u'
+              b'lksVlUubFTDkbTGu0cSYevi+BvKJLEJB3HSPQPJq1ubm1E7bPvKGc8o5ktuDwKzm3RhDFvLwMJMotuKJRXyPHRaPOsYISzGFT7p/'
+              b'nt4HY/g9GgEHZ4N76WKPujj2R+P5Q2lwD61D4SfiNm9S16sH97I9Akj0Xo7yDdlxvOYcG0baJfG+HytHtEPmpqaFlwwfMIwP+Uws'
+              b'DIRIOPGgKxiShnAG0HicX1hMY0cPd+sQJzioUPI0usUHRQuYlBcS77DqxEhmT/IId40TA4OL97DQAUp8P2e9cXHV/ZkH9/ux8fO6'
+              b'biITUOJIo0YGNMIlRGdnmJR3IDpxCvWRzFlJbHGFSENVzvpps221rhqX1lm9eS6u2qTr1D0FxWG40q/JmkB5KUyJrF+gCiRX+OQO'
+              b'qG77pFzulEKKQ1DaRQu7LOOYqxYVzr/ju/VMYZOIZMpKiZQMFS+UE4JEbJne5j6HXNSSEtrmmZAsLrxOpmpeIf+uemYJec9AqKKU'
+              b'2VSjvjX4RSETkxG0ulBdtqyLevfkw6H1/fZeOV7nQyxHumAmEpjJHJObtGDnOevfx98DAtQ6olGcwvERPxfXztipVOFQZYOUYuF3'
+              b'Wy3rvHX5/m8cruhIr9uyOoVL8xR9ns5a15enqUHqipoy1ulquJuXH+vnzdPX15ed66urVrvb4DXlHNOzYHXc8Zi1T3FiIz2O2pWp'
+              b'bfQSwwlBUd2jycAf6e+M5uBGPPLjewfNImcD8aj2oBAFvlbkrhKCqiPt6dgTYPhWuPSJr+R/qB/mktnIvDez0BknzhwQHSVZlmZI'
+              b'ahY2NXVL5LU0D+mrzQ1X/L3pqjYpzWWqmqCZmUsxdYX+3myTEpaMTVriSSpsfExmVGFCEsaUCUkvhQchs8vUN9toiNELzYakOzU6'
+              b'zxY7O8qHQzWbQOLAM44SDSMkUTBJPJOmIYUbA1Lyk0y2tMejBIGUW4FBvtBRcGfNxI8n4voq0hWWJEAeUABjRxx2pMMmVdnFiobb'
+              b'bbKx1EG2pjLYZSFkadIiSQse70IfZhAmoAaMBkXBrvNTUGKx6p5EXGvA3JxWGKloyoo9t/ogFxo2idMsbEF9wVuuaZqTb8YYZw6Y'
+              b'1t7XLxpWp3HeOEH9+FdPG4YZEQgXtcBPOR/yYZCjdApnSESjM8fMCbdm4p1OaCJESKcEZ2ZNAqpzE0GVZiWlOOuSWg0QCdMW9iKT'
+              b'LtM8ZadFdBjG05H/zGytHkWUKMndSifZz8hsZ2RvDerBkG5vw6f0ntTYCeVShxZmyfJl8ZbG/xJqkm1XUgfzjdNE8rOcR+KFsLDd'
+              b'S2HMTjnXsQJ6UitZS5XBy2Oo2/m0OMEtFSSATYH4KEVLnVSw9uS6o5hVsEZ5GAVvtrC8rP2rOsHgl/T8gsW16UV5QbMLPrPJZWF7'
+              b'OHfFPoN81LYZ8G2qOmWTQT7+7x9S2zDYevhfsr1AD2J34a9sI9uEOYvw9BsTxaEcU6IbLVquQwIDi8chRp3FqOgiPZ3YiAEBj0WU'
+              b'5uRmH9sZOuKDkiQXBiRd9mNbHyTL4U1xUDekmN/TkwUWddB3YnkE/88qdtY7V+f1brfR/tC67jTWbb7IUgBYaM7MWgB7Y12PHlyi'
+              b'WL/2ujIaTOPhK+dvE/kW3rIsP5RJj8fZD8c8mcR4bn0JZ/c4lPGq/B3ufeEX5jdGCYSSXa4cmUxZnsqghSZxxbJuYRjdGzJ3xAlP'
+              b'PjrVSs1D90vziqFDzU5vOWOFhB4xHiUs9WfEUgZMHFSgiZu6qo1Q7qLMguElUdpeFhlOlqLA0qtWhWkS7yKMfrFUGDtjeL6dg8p2'
+              b'+dZxq/v4z+6bA/xnZ2+HXjpEVlHhPYLbdVnhKhXefcMKJ+TZ2l0CniaE3N/ShwjfGeMIinMD/cBAxKnceVNmVOziP2X5Z5e932Hv'
+              b'K+Wy8o8rCqcZx/iV+sM2U7TjREMUWk/m1FhPLG1xRY5s2MQy1B6P5GIQXpoXg9Kfitd01jo/lfUkB6rS6rATUFxQN9rtloDmQf/c'
+              b'KgjjgVNxOGAS9Q9nOwYEwuHs7JcpVmNie3JAUEGGsdSPJl9ibTTRbZkQtKEnmrRVZVbHN46ZFUYnC5kf32G0d6btc5cB7NhEi+PF'
+              b'bGyyt9eT6zTQItzkZE0rq6833xwn9g/7Lp633hSUZ9MbvcApThGK8IgjVq+zGw1FB1op9+biO7ENyPqzUoVRUt0shVuEzt6o7KMA'
+              b'QInQk73zFvl6mISL/KovecicluhY6DIUfIw22WpTejq6CapGnNT0rNxCSC7bGTaLU81weIwolGPr++G6o5RONxH0AUgsIjCINHyv'
+              b'urvwff36yjpt/XRpfWJ7zi3rXf3kx/VEunNSyowxkn6cju6BCko7isC8b9nIo/nBOxAB2dqi4IK4GxzMEAXENkas4BvnRGgN/5jC'
+              b'InDywuwVWWYIcrsLi4OpZLy+jEHwzNegeSlYj+UAsCYhiG2BmBsuHIOU5jbv60sDc8Wq/cUnJ+MVWHG1UBEBmRHSWdfQrKs7KKnQ'
+              b'GUWFrRVLywyTL67fgEEQscy9YRbNneYFUwReEZ89LwDvi8LgfmsQXl25Y6aLn9oYDf+08e76vTlII5hT7j5punMMqNvpNq4Oi0Lq'
+              b'uiKoY2ZyNUBWK6ivYJa5PLWuPrS6Lat1ZnU/NDtW56TdaFyum0ovG/Yxm4oDGsyT1Ry4b7SMhjkJoCIYFpgsA2xBljCjlM6/oVyU'
+              b'pZwhPfK3wH46wJcUd7ZHC/Q/jNXxCZqH9yRr7/P+Ta0IluEkyJ1iyA2YfPIA9ADeIryolcmEZFCSrKV5QMxFZsguyiZMoUfJDtos'
+              b'ZOqc5rE17w2+wt+f9/Dy+uEPdg7+vJgvWuQUXGKqPHWor/bsvCIa//f007r0fwr/yzcekQw9pr52+esD/XWlGC+nAac5WLSPdPpf'
+              b'QVc6bn4DQgyPMPQ8tRByFEVgjUfRWMQ3HiSZV58QvnTlSRG9anyib8cYgvf6fDEpsL5/Dzr6HtZRmHZ6Et2h/z1ZWiwXkHv2BP8d'
+              b'Pj1ZMz+6C1ha1APrx/Cd9WF+slc5KFMiny+wwp58McRBVD0FGcuOyk/uGQvfj/Tyt7BegdcVer2YbCbu8nqCQE2xh92zs7Pr8yIe'
+              b'stLHnkFhLa5a0T9e8QBNlBJzXQRFZRcOe7PVkReRKRv+c/zMsw3xQJlmGyPPUzWPqmRHLJXDiC0UMEhCkuYovNnmddsLmrNIvZib'
+              b'C/J6Mo9nkweUuq0vuHKn/aVDaxiMwn7AE0+NA3S0YhlnKUsbow8TCgaz1/A/J0/pwYQ7uMfMWr8HMgJofx6OKCXwu8ZZq40HIl0L'
+              b'1viUYIuNkiTNVt4IUPtpOh09iy7ijCuxq+B4UrJkdzmEJ8xGwTIU4O7l/sOCCQen32xCttRkxywxkdusWr75pllMzOCFA4NCj2al'
+              b'287nFffDJX4aDEjaRkFJ7lgsOVImHvDy4zJPVMUMHeWHm12W2hOUustW18IV6lK0ll9Cq3GZ8g1MRvdIcjy5aHbIQeZvIryABD5i'
+              b'cYo6rXfr+QSA6GcvkjHVcUeZoTBjMmVML7HssheNi1b7517nZ7DUL3ACKZpxipjEScOktdfty6LeZffXHr6hQ6Cuq1bzsttoW3hK'
+              b'9x/tD3TrL+wPflUw3Qf49m/oA8rZvFQfCNKOjPbDt/QN0YBeWjBc/p7eWTCZFxK/ljPP58VjM7U8vwJlY06bYWQoRvWl7QhJuqq3'
+              b'Ow3r+3Jlvu6EBQyzTEzXceYX/lrMFsPyVWcVLYpesYnQeUVTnV3Mi+U4tirPGLPQ9bVxuhTPvolrRXxbLMELuC5seDEY/xPsrJ+e'
+              b'thudjtVqvfv/nJt/1+hku17/sdEJwvGZCcqNV2hgWsKYzu4J/718Ygxq/fif4tHiWTy/rau1VG6CdpLmcqYX0P3iJn/969fYwnWK'
+              b'clD4mNGdLd3+DYts48ybv/Az2RdgUIglD6xT822LbDbUJYvmpjcak08aHgUYWVXEoMdwGExYSuweO1A1BX0uXGMx+1ElIkO/Ut4r'
+              b'L0iB8Xs47eG9KDrQUG4LKDF6qZEy2B35RGmlMvWncRp2L79+91dLC4ZhQrayEIZ/0CXN5EVN/mTufHr99DG5a5rurygYBOFjukpT'
+              b'qgV+oZc4MHf3CsOPZsawch84+Uk3B0UsUv7G5ZFG7SXIoTBhRM6CaKhmcpKwqMZ4qAdaOFSrKDAqhU7VP+yIYKtLHDliE2DB1Edn'
+              b'ZjVlQKox7AqqODPOhGdXUj6Mj6p5m6MifwUGRR5vVZm3XvboNu9MlhVj4bOnK5djwbsHK5dzeaDtPF6+3rA6LNAube+Nh340BEaN'
+              b'70bBFkwCv5EbAo7ymJzfrMk4sDDHgsW4jld3Afi7lG6dYN6g0kMwu58MrbKNcXtxv/20cXZeB0NAfDmwtxH/XvV1MB5Ez1PMYM2d'
+              b'I3SMeFfyYT6ahVss94rlR4N7GHsx/Aj0PdEo+JWlwiZy/bFFXjy0gZnatVTEKHiaRf5gRqub22jyoCSJSEkSfJCChMJnMsr554dw'
+              b'3Asmg6Fjsb+DYQ/jc+K/FCoHf+BJCMZAyp7LksIQEavTEwZKLNSOAiuIOKpUlBiw5ZTsClo8AX68t7u7uz+33koEW/zNoVVO5TTU'
+              b'Cm5VKvPlMg7waQQ1DPy7iVjQhfypvFferfZ3MRyHMU8AHv9gjZ4gWm1XxqLZ2kKQBdMZgmwC4ceiFXRZiL+UQUiEehbUblaARlnE'
+              b'NqeKAJoqNdP0qWGqUoQ10V/apz3xKa0xM5AHCJl56wKRKod2Up3HnY2M5XRQLpiexg+l9zYxBmSmCMZqzi+xN8961iT+TyyDJh3V'
+              b'8rr5O/U9VqC+zu+Iag31GWkUTG02nsxEFHGyu6zZPbwlhy1Sa3TgkTnKQEuLKtWEhdMn320xGJXxuxnW4Ckmg9scDA1HDqwqgDpO'
+              b'i3kqzjvGcGWIajkWkoiVb9zfkvrkduTfgTZh6tehqQwzuzpMAbKfg8nDA17xpgecAnp07FMz4CQrYhANeiJcJpVmDNqp4HV37ZHd'
+              b'M4JG7FRqZn8p5oBHNUtgh+JRctUp0Gm4s4Zujglg0DQYu5X1Ae9l+IXxTo+qe3M5XLlEY+zWNVRgoIaYAstLgwQ9uJ9JpoO814Yh'
+              b'hW6dZ+xk1jsZyOx4tTTeeylSDWPPUrsnA18xVKD1YLZENVtCyFSG/oqhqVLsMtA7ZSPxQjKz8JUsfCK8WXAD5Yp4ZlpaNaCXwuqB'
+              b'rMhJRLRfvpBt3Ezisct2mOY+gfY4kUZVNRyYOO5JQvcyeZYpxKLEasp5krWiyWAWTbELM6aUSLBfuXKGS9iuRngGyt8YSqvildb9'
+              b'uvClvmbXF2r/afNFQoJbzh0QSrR8WWfBaJDgGpG5IpWE4MzXgdgTCrYUB47brYveefOi2WWeTZnXBcrIdQ11SUq0eU7Ob/Lz0U7Z'
+              b'zG91jEhopiCr5R1u4SU0ZNor1LonC+OoN1pjCUQFlNpm3j7agqIGBcRjIWene8lfyRABp7ZpJ40v2U/IC9epdKmJmjVltyKpp2qA'
+              b'5NOEKQG7PrLWPLVOEdpf2QSxUrsgSsW7NcNmIXeIk6Uc5LOcpIsaqAadZdQfmKj/HdQHrAweLPaPOXHc71HNRBkFMWHlkvgl7Nk2'
+              b'bOmxL9uUBDMcezKwaUltU345/9EPR1SQ4ornmiR6ReQrJWqSbFxQCXOwwloKTB8LA7WGY1DJM0o1XJG82MIr2D+9a3Y75mx6IhTr'
+              b'igKyZxKQhAZZ/S+9s+Zls/PBmAWQQBvjoYAuorDTbTfqFz108WVOn8ghCh2MHBKRY21d5A0KY4U27mfJ+WoW7GxFK1RzsCg5YRY7'
+              b'tRUdwAZzZCELsp8XNF+b9kxF9JfpUL7JcM9Iobm/lMj8GuI1TzVbv7l33izROyYtTbN4wVDCmzrcADoWIcZ1R3/j4fZCytVd5aQZ'
+              b'lYWpKVWtm9w10A0143QkgT8LOLPj8AopXIFeV6y1LYxYhUu//nwGS262OzgA6y8Kh3eB9cWHJTdeXUwttFObkO+CAK81o0fumR9j'
+              b'mim2J4lXWXq389EIG+DNojnu404sn2pmNqv1MIcC/QARoqskhqibIQiohpG1jSgpV1Q/uMXIbOykRDknAWLH1AiLh6lTNgbJ9bIn'
+              b'Ty6iyYPmss+3IVlX5ObpcJSwlUpcDAylhkF6legYSmA0PX4OCzyA4WEy2WHo0q8SiIBvEojUWg5nibiKrZLMQoQDhfRD2D4pszLJ'
+              b'+1QuJyFG0NVeRWXLMSKbZatFRVAbSlUkIBwNQzZWTgKoBMxZ4xFzEtwVWfKzEkmC9kYoLm25xsIqYOZx+pXskXDmJJE5CuKAYZQO'
+              b'EKazeqfbA+nrdS+u8HwXBYxCWXFSqQYllRSrgcV04A966A4l0pjSKG5aJhZNOjuZnpfMlJksaYssDt1UTq/mUqm8klIsn9dPbczn'
+              b'9Sd7OIHJt8t/d9vXlydK5WpSWmhAVaadEgdk5mRci9JxfWNCLiUl10902xoGRYnlY7Zl0ixbTc9VmKDLkKIr/YUfhibdmkAk3NnV'
+              b'A/Ka0nOJb3kpur5brtakTi1tmIicoJ3KZsPg6Ue6Mo6CfpabA1sUQS2hat+UYBA1PlPP5iDB+lJApBA0OWVjgq7499p3BR7jyEGD'
+              b'Bb780JM7MZ4xN6AENyTvLIvU1GND1vdspsB0jkBLTwyYaG2ZfDB9EhT/LqUskxFQsWIES/ITBP5uuDIriyn1py/PLpM4UMNKioWd'
+              b'3Cf4eZJTQGfIc7p0NkG9wYbEe0qFST7H9IHPV0MOVdJyv9vGPOuqrvt9y7S+LNR4CxVeRhwLchGmxDFP6a3OJhDtt+NDYNbOkoat'
+              b'xFGYxVC7HJVRmOYqJB8MOlsZiHkiZsiky+Ou5CwCxp7xPFlidjJjx8qw0dQ5yfQ6fontnixEchResjJJK0wxWaQWH2pgz9TSKJNf'
+              b'OrUUyStlWposeQVdnkgx3657sAdZRolSvmVuZUxzwwnXveVZFXdvz93Zq+y5c+NME+YdzJFuZadygOj/eiy7WnhTg6cNz3L39vf3'
+              b'99w385p5pXW/WqOJn9hyow+aNpdCo+S9+VouGKaWGAMomu5gkSc37S28U1t7AcN4voqxyNo2/izSUVtIE/u2aVVqSjRtFgDSeowt'
+              b'HhTS8kehH2fObpnuzfouZSJ4Q0XpoApmN5qNKXRderRRPw4yPbh43Xy/TCSArGviEoEAKLiv+MR/QCPX180DmdUhfFkt+UMxcOTn'
+              b'7FjWPn/OKXMD1ZcLyjF/x5hkS0VXvrHeWu5BGR1Rlgk6wQr7vzG5ZFcM49FEZiyAlZkrxzk+9Ab+1Cn0X09dBUQUFRVFZXUUbMyI'
+              b'lKzw0JPhBs0DTwTFNX/FQJ35X4eZopQjdzSXYXsy+uvXjOPk2BRdBRnLY3PCL3a3uNOtd+HveavbYZnahI4gv1EtC7YyIKB50PUy'
+              b'AqwSwkMJAguSIB9BHtRAsOp0m7hoY1/LPk7W61rsV31OVRPywcJcFE7l086rreJIcUhqe00c6axUaUWvNGU0YXfLXZGEVbQrwj7i'
+              b'n7f4Z9M9zFHruQGBM/oTv6J6xn/XPCiHD7+KGIEoR6gTFunYTJIEIs8YjUZkOsCodSilvxrSHGTP3/lR0q8UAYyKbWEO0x96P6ho'
+              b'4HGxua7j8BiOra1fs0ucX3EiJ0j0YH7/Q409oOFSFw8YmeFCPOzAQwMefvWq6TmeVXjjlXNFTJpZZhF7/X3c+7588GkbRyMGc8rT'
+              b'SSiJDlbn6Ckt01aD7SCmTXcZqU20WJLQ/cWhg4iOYBxjThu5l7bU4j+VOsHgeo6HvLTv9Uc2Ln4quU6Of/vFbxgnmTqjDLN9Cv9y'
+              b'FCjm+zC72E4H6//ruBhKA1iZD1MvKgZzIqdLsLit7vS5teVLVrSSlW9sKNucD55gpVXi20CsXWx7D5aPt0HkFFj4Zsd3z7xesBk+'
+              b'k8I0nzJSlDPMbMpWqcdi6Lh7OwdV+y39cyjX8TVD6fydy6lDmIsX8Qwkr6Msa6qun4lBW8stqFfuKdrT0zpq2S7Kds7/oG4R+yr/'
+              b'n/VG7D/CH9Dz0lbODAx+PuUqR1M4fJXHVM6e2cNUP7LKWJhZbqb71n/GUzkdBuY73EkNPgCrMaAa/VMz7QBH2blavzFluvMlgr/L'
+              b'iBNK/6Qn6+SafhxEIcsoQ7f0DRuh2llaYiQjh8QFehM5nfrHhkWglp6xQ9GZKbI41/L3abPn8+w2NxVbTEfruotR1FgMApWSnVrW'
+              b'z34txZ8Sr4ZlyTPsuuKulyCltoASdqFbJaFaOCy8zNKQloU0/yVnla5Nkq28qdhOJmNNloM88UPulCuWIhXtsGaFhjMp6LyzTpvt'
+              b'xkkXuM+DzyoM2F1w70HakTA8ZVK7hykdZW7Dj3VqqS2aQqe69GazKs9zEf7lDdAz8iik7xWRLo5e2HBPDl7Yc7o3+AYy+7j94N+F'
+              b'A2cdFQdSsO4cpMA53GMQYSYpZQn7sdHuNFuXRmhpInsZk9kIz1kj0moLT5isEkzBK1UoG5jaMDKWB6b2J72Q5TYNIi/1XFQmUyin'
+              b'VOrkBkVqhRPi9IGOcDNbQoYwCi4LLZsZAPu1nFGv2oYwOQhJKpQjHNUsx4UZSUEv5JzRRl56ntfbbFAqyiqFH+niACzgDrtbn+HM'
+              b'QeGChqM2L1UkDPoLUT9zLZF7bLYcpe3GJc61GVLfFKmCXGw4M2Qi2KxsC7FB+pfaQisbMOLyC/eIW91I+jdZQPKmybJWkChAt+34'
+              b'7xWsIQpUvZo19PdP+nkWUzLbZeQ7Yymt7lmQde5JuRYk1kjKZUA75D9K6b9s3Orc0Xbe6lqUD3NpA+yFJ/1F/DVPArt5UqAsO1eZ'
+              b'AzQlrBx155L1oQFjp50lbM9gIqOx8jAtMFb4LRrdSlnLmimGOxlpW2Uta6zQDr3BRsnHpkKZBq9CrAq65imjP426JCJP23pnbCYf'
+              b'jCiVcqpYL+POkdt5zcuT1gUM3Oa784ZuWhTI9qJVl1i4G1pRvBhbinBFMeYuzw6WGxTCplmJ4OVMnfQiyWDPFtW65hlM45cvRE5a'
+              b'7fb1VXdpuyNZzUIXZ9azRYS/nMY2aAGMJ5Vd6bqFnh0FRmV6XWBeLhjL5BUqLtUDwQofybldwqdf8Rg3PbyPzY6BF0ZYWSZGTi5f'
+              b'zfFEl7QV1Zws4qR6PDf6VxhC+5BagFXEw+fqwc1fG33/22L/pxKz4DbLaytRLObo/UCS677Rc37wnC6prB9mZxh3x3xBHc8Aj1Jn'
+              b'yXYSeQv5J1NRw2/b4ftCaJTgsVeYObFKjgcziDcqxagZEyTqrVTxoqo8zy0XI4chfg3WdpIBJw+PW4yHoiGB2r+8zkFTVLjxqdm1'
+              b'utBj7dZPnUY7i4H19m7VcauVzXCjggkYCA9mt5FjoJeX6KZoR8rgAsJTOqW8QGRunDLP66D7rGTkrNidhuglPYS30oyDNyFOaVpW'
+              b'Ks2BsNI76wZUadbI7l6i2o1KccXJMtaALC3BqxDCJDqzTCC14cHyqz+fzSbjuDeNgkdPPIwnX5IvwfAuo94XVenmVlmt8bBvepHM'
+              b'7ansXGAO+/x2nYd8a4MN//P6oZ6B0MJ1SnZ4fFOjs14Tasw20U73xaxdOtfMUkPCwOx0NLY8J2cZwdx0zXn5INymWX2JPlKz7xZ5'
+              b'Hyt0ekpEOUO7ZYy5zMndcsW8tQU8MUbMd+2c+90qNntpGsq1ZRjMZheMZSnWtC/kbhb3koTycSnj1h/y59NmxxjIPtEoJvXgLRRZ'
+              b'Q8BLe6nhy8frzt85XkXWN9myfOvTYUnvcmzQjPff/ygbVBvVTC3nJ5FiqZ4SM7Tbev8ejwnyzdACtWM0f7CWnT2shVmEGnkY9B8s'
+              b'KMxSazR5KRehQRTTW2Y5CQyzAMeJCKPV12t2GxedrTeilPmryQ4XWRFNJXIzJBpMdXU4ZXVKgfX5fWxhsnNj+M63661LGOsYfzUF'
+              b'MAziQZHB/E0kca1iJSFgzVb1SkhREFFG2BrUbKonkrZ7oGaTRLETBrdBiv5WgxsTqZWXMLizidcWj8Jci4SdU9z1ODuhsQ/ypvZd'
+              b'bxQ8BiOL/jqap/Ptw8yxtre3mZw++r1RGGPqmSRVKW+eu8cyuAAIhSYq+VMHChNxj0muTD24swzrjNX4U5sjAG1c4k/JvWFqgB/P'
+              b'kF55d1h9iSvL74eH1vfb7m4Z5J9cjFiTkijP8iZkfzIZMa4E48cwmowxYpSy2zh5ePDHwo2KB7fVN0O+hLPBfYkDZscxJgO3WH6J'
+              b'xuXHZrt1CRLaRf3du2p+apz3zlrti3r3MCPy0/ApGPVYcmxvg/vKKf2lfrc2bHNkE773ouHyGDVq7TiP7O7t5qRgzFBjwvAJUBzA'
+              b'f9+Coww43N3d3dpyPHwPPOTJOqTvRpaPG5pXJmOUxz3cWel1cQMNwx6sUnf9Y+PFNUPZzksrPqlf9k6vrxqmKkmgeV2ENqeKf4S3'
+              b'w+A2p4Lz1vse5XU5q580lqdLK3ZoMqZNI4ivsjHawXwwU7QRJtzClNy8OfbWMbz1UirMFD28gKumoOziiqs/0i97/AMUUHi7fPM/'
+              b'1ttNnN5611enMBUt6h1W38skQFR1WNwYvNp1zrPsId+sOc7js9iCrvfno1lsSDBWoLBErZ3D5cs0L6+uu73TRuek3byCcbJK2ZPW'
+              b'Jbw+P2+0Ac1ZK7exK8l2/fq02ep9bJ428Bs2Z3m2Z8uaOhkXCLyPd7T+xe5okAEG887snu21W7D0pMDL/nwYwlPFTnWKUQx5Bx7m'
+              b'ye5yCx622T/ol1R/brqwKWfAL+Fwdp883gfh3f1MeBJPce7LdSV+cp6d2RcnfT8G1wciGAph98RJLKLmD/ThuNv41KMsRvKzfGWb'
+              b'FsYYaHTZicpoclODrCN5/YLIsDas6txYX7IazitYkbH5at+lzpLwhOWLR4A1/njvsVamlm9fPApnNp18qZQI3q7BkFZeslLpVV/w'
+              b'tP0T8XcGa2N8+sA4jB2yMtuYhZBlGl4e5RF/H4MovA2h4+vzaBL5LO6vY3HbAgBQDdWvmsyetSbj0XNm+GxY9et2q13vXXUqPVxr'
+              b'4C0cC91MWPF4Mo8GATMlYmvs44GX9b5j1d13u+9327vbWYQnk+mzFU2+xDwS0OgZl/AYuOiqc3HSdfcoPfg8gvE5nljTINoi7Gj/'
+              b'cq8Ag5bENd4zrCGfj3iPPZsTXvErDiKxMJAhrz2Id6QpZDjG5w0SpVpeNEDWcndPKQBjDPA6muhtcNNY5i2wi7eQVEl+8QBanSl0'
+              b'jTnNFfbSLi3FKMOWmQzDvDGEFbuRYdlCSDuGMHo6YiPyKS+BmaRw6gHdn5+MCSulDoy80vT42H1jv9px5451xx5d/tinxx16MqEB'
+              b'+qECT0lNgfs75fL8z+jP0t3R0a79Z6l/dOSWTSEXvy7T4Ybh3BHpCc7DPhljlrDLra1jGGtbfNTJIfdXjA7WXylBYC//JwsCYV9F'
+              b'EMqaIOxKOZj+J0SgyBXAXZw6x12w48CNBLJrerA6FvcMZa/E/sN0FMTCmmCbJjlZHsihJeuOafDF5FjRZmAYuUmxxghBv5xneT+I'
+              b'QWS3Atn+jZCU8pPLoxyj7xDDQ/kuvK035SS8IEeWYixR7rFvG5W50MyiP1POEh5gj6PH3hc/nPWophLtYBCWXCc6laRoAT2yiunI'
+              b'fxZVqCtVW/TLwor1ak1eH1n+5tmiDNdkHAjOWKPgduaIh4gsnOxWPBuBfhh9rtzU2I/yjYdF+ZN740VZm4rt7CuiibCOaxfkb8Hc'
+              b'zSdhNBhhwAeMdth0rJNoEsfisVmzOv+a+1HwuhuFPqZ2obQp95PRcGs2wT3HwOqiY47VfN1smrOkSKXClsG/Tp6n/hAojH9bnO0K'
+              b'oQzb2iXljOTVVf20d9JudTrkoZjyHEpv5iJC608PVijzoyNmCZw2PjbBKmue9v6r9TMie2cvUWGzfXLeUGv8hgrrqQqhZ04nlIMC'
+              b'NPcXnLcynRBT/3CqoJ+A/R8xVw6fyGaTOwS7n8x+C55jU6KKdIOYL469JMUcurYQa7feJqTLYSXohUivr+wVmAvQCzHiQZC9NEaC'
+              b'XojzvHHWXR4nQS/E2W6+/7A8Oxn0YkLdVdh5vgSVKyFsL0FhZSUKK0uQuBLG9hIYz3dWonFnCRpXwtjeMfsoJlYWYimYC67JBOLa'
+              b'fDLGFWkQWcEDi77MZr1tqwsLVpw1bqPJeIapT3BHM6bFsq74gqfpKByEuDTVoudG83HJBvMwGPi4c4cLYJiMZwE7yIH17JAUH6LV'
+              b'ESJkFNyFABvR7DCd41bBaGTJTdXSMPTvxpMYZ52r1vk5zkDPAOvPrN+DaGKnVtLYlrs5qlc8dw/GuIk4mfdHwZY/fPTHg3B8B/2S'
+              b'7DQOJ2CCYWVWCDM5cCUyT3g09yf0GWa5fwBa8qz60Pqpd9qsv79sdbrNk07KEhAYmNesHv/EsIUGMpTnJGtOfGTyws2WBVvAze6u'
+              b'KNJqvbJIe//zut5uZBcW+vyI4bNKKR9i63viRve6/Q4W5o12s3XaO2vXL/B6z5HyqXUpXtdy6uAI06FiclaGaTK8bHrgDPGL0l9m'
+              b'+dJtN+uX78/zOWNizV/PmxcyZxnuLMce82U6sgyZqNOhcXJQiVG8k13aYfAYDgJHsQ6HwZPyOMwzpKMgno8yvhFsUMoA2C8YmOyI'
+              b'2zAyBQCd3mIjWMRN/JULxlrHANnvXNBwyMDCYS4IZXLWW2xQF4bQ6Q/+s/WveRA9k9KjtIkzf/oDZj67nd1Tj9R4KjSh/0HPT2K+'
+              b'k4kZHqf3z3EIShJWKkN4YbFY7OWtqskIxY/HVQoOxFoNQ0ab3y7qnR/tNU97xyY8e6kwlujgMfS8nDmTsBvy4ZLAyNVsdtlirywy'
+              b'onuweI84bJYcQzeyaK/zhBqkzlyKjcKeNBe0eE1LomC1Yny1tVK6CPQOmCCYYjV3IWOb0fa/Ce27PLQ+8TIM4jw+9s0AxvMnLkEm'
+              b'7nxdWUWg3B1hhlpGB+tyzY4Lda9uA0ncDyMsdsEwLHgOhQwDsw2Lp5o5eWYRTlzyFGFlS6LV8eKypwgvWxatjpeWPkWI+dpodczv'
+              b'VKwr7EO8oKp6cVW5OxAvqIpW3kX84kvzF2CmnYJC1HwvYXXcnw6T2Z2Xpt1+2izB0zm+NeXQkoI2tD4WuwdkqvjZXIXciEkqUWvJ'
+              b'bIUtHAeFg8B90RAoFP8XoTyvFJJZeRGZhTjbL8J5vlNI586L6CzE2c7FKbwaMmL0jRNM2kwwTVu4p81n2FeWNh+lLQXDhLTIeKrj'
+              b'Jr1mNAgaDJNzdp1UgPldgrlvxNzPw2yYRHNn9QUe83SzZhj053fK+v1lPu8v8XSnY4tROE7cT3WPd1QzmMeI/MsTIVnXXUsRgfAo'
+              b'xd/yimK33r3uHNItRWz7PO5hlnOQYX5xruq4bsWpOIRAuuIW4a23Tz40PzbQSXWvEq87MpKshnTXdVyGNPFALsKKvvIUKgDwjubW'
+              b'ZaNxap1dn59jtAxGPg0BjJNPuX3pSUv8pFV/IKtfqk1Ye6f5HioqVz4t8YcHUZUk4eXnz+UbR3/hpl9U0i92bkyIqmmw3fSLvfSL'
+              b'/Ru1+RV3Re6f4I3yxqcudur+QcyZDSMyxDAAsPxDT5JYq6K6YhUowxeNi3eNNlVSjpUexRhCGvL9FZF3GxdXeN1CR50knynfvNXf'
+              b'HK6XaPMRFDTeulxXa98pv4R75633VPse1K77dKuoq1m5lB+5gzwz9w4tcTUAw7uJS7iilJYMpx/cheOiRDiacyoN13B8O6HI/rX0'
+              b'5/g5BiYxAPyTB+A/Mhj/USQSi1hjlEHKNiZ4IBtNXpNgNtpr29ZwoFhQBGWe7SHTqfqXtLhmAPQ8cVsi3RgFu9d98zHikehVsBNO'
+              b'Gk2MI2V22eeR77WXn3MgE4L0G52Y7MhLJTWScbf4gbWY30SKM8IdjsMZCzsh144i8NJMuxWQviZg11LAwoXiFibQ+5JwrsyAsVNn'
+              b'dsheksfehWC9vo+r2+S8OgOtbKEnP3Og2N6h8luDQ34AP9O8Ye4eaAigFyttZPHd/vGYxZ/RdrNmE/qKUy9iom2xxwCTZMchOsCK'
+              b'/TK258VXAH/oB9psCw0dcmhnsFzDf4526R/0yknahZnWImgw2CL4kW8RUjHHtB/GLCERHwpHYTKc8ImNIj7aAb8ypBm4nTMi8Nu2'
+              b'9uqteyjy+dHHzIzAZU6MIuM4dIxFNQWQwSvTSZhH9oKyyTD7mtFJyV7ZCHPAynw2vJkyAQ5a0vKjaCf3Y9R1mZL0VBY4Mqq3t/L7'
+              b'oVn92YLmMJ32hu5eGZgt9KSTSruTxk9TrM5VqWJzYHUuZuSJzwClV/6jUFP+4/YsfAjHd9t85EcwPo/L22W2h6v6rdBAlX1hm4tu'
+              b'lrd3GU/kxboMjmrVLTNLWowI5EQyIvDJFgSqOZloqZSReKlFPUNaT+Js0t2JeMgEh9ylKXVfX6ruVF49fUJz9DR7aq8YsuulJsM8'
+              b'aDVXEpKzTSNdq0n5mKSgTd4lM7l2fpQgywjqW/3NoakSg67Beg9Tma4TCgwFyofa6P26zHQOayKY0//SqTyJApV0+ismdtYfuiQk'
+              b'oZqqlDBMCb3IpqjkcEOaeLRWHUb+F4bkhWfMPEKlf1dwv/sF97PNh9O6O2Z2U/su/jGEeW8U+FHpLnbSVUIl+H+stuwpZ/C0fRE8'
+              b'gCLfqWCUe+4ZawiWYPD7NHnDMmq4Hz0AYn8gWa9mMkfrIm/ShYmZWR2whIBZaEqKhdcnKspm5QC1eeuk/uxV6Z9q9QD/yRQp3QLt'
+              b'M5tfz3C0x3tYW2QKZDhPPE/9sV90CnZb0lxW2Spnz6G78nQVyWqZr+DzG9t/WEoOHf8uCcPp4y1ZhqHRbtPWgOLKKVdbrCoqyirJ'
+              b'9ImAcxEQj/zIAJ/89nYdrCyK9YIkHtITKJDTereeQ3ARpexm9/dD67xxScRiTexImXa8kppNybkFjZVUY1YgoF3/yfq+XP3EakY9'
+              b'IpwJX1nlJ/QLnudWu/Pyan9s/Myr1R0lFlVZfXmV/2yzKq2L7+frTuY8TtbtmI9oc0nafTlJ9ZMu50J2O3YxL/ZeXvEVSNwp/K8J'
+              b'//tIMcp0VwUn45PgaK4HTnrfOZfI/W8gEl23vp9bJ3X6VxCZeEI5GQ+MXDIOvoGMMxyf7ztbu7u7LgwT5RJRbnVvXl5d559tbHS3'
+              b'3aQ2mw7KmIOV6ZP0McqlzC2/nLSuS5RVOGH6cWPyIjmAzKPB/YYhgyT8E/73jv9ASrTjByd17CC/97Xv8vAgn8xvUKtXH+qdBlKI'
+              b'BKb8y77PceRy0q5WeYD5FC/QyBKO1Chf7iQ79G9pGxZ3u3m4y0M6X1BeZNEaTDy+ENAPKn6qN7vNy/fWWatt0S3j9dwLCczhPxzT'
+              b'bWM/uhs4PMwA/H5Mm2h8xQdQNfnzMZU3NvaYgYUrwt7daNL3R6ZY43ex2EVz0wi2jq86F2j8wj89vFhpBPiFQ/zSMwH88o7SDMEi'
+              b'llvRyI9e6+wslQrswRe0lk6hrvZ5r904byCgw58vzk7Vx06307u+7Fw1TvITSkpQrWT75OeT3oHjHh2dXtR7Jx/ql5eN89775plt'
+              b'pAm6YcwJKwRXuM27/y42gjxMhiAhzL2FWfqtywaYjl3bnEcdLWG5dEf7O/desLhLXVMuB2vv0v251LoBgT6Cvczl6RF+9li0ZqBe'
+              b'XyhQQHtRoyN/KFXa8PBjs9uD2a110rvuNNrvrs/OGu2ctg8mj0HU0zggX6X5ID9wbpy0PjbaPdn+HFjOpuWAC8dDAqawlL1kjM0D'
+              b'X4W5Op1O6nF1Rksq2KLEK+lkYc53vUAnvG2CjLeng1I5e3PnxyCYsn3iToVUKAj7fBTQzS0MVjG0+sy9cjCPogDTL3BXyozLCNRz'
+              b'DovOCypfWo8mD+XDT51mq3JRv1wHacCdkSxp2SJgIOSXQOufRiz3T4BnbFymZQiHOQp7Zn9adOZMYfLctI9mGgc8X4HRSTH+cW2P'
+              b'37PZ6MVKCHomhSDbNTykXjkbvaxWM3jR4fSC6ccOypmbrrQeG/jjkik1G6/GK5s2DvT5712j0T1vsH2mLVgiW43L983L/NCTPH5u'
+              b'hbZXdjAwFmUuwOM+EKbOurOE04EBLQ/nxQ/6j8rm+7/5SZ8omGPWX8CAI2nAmzdOBbO7vZDkr6ZGqPEQVY87Y2sSSr153BenQAZI'
+              b'nTvHXg57LAvRTKPJHchfXFrvnNQvrYt6pwNd0+quG1HT5iPuPd5ORphCQiQitmsqeShpmAOslINjue4roLBcSKKRyPLKVH5dgnZk'
+              b'rgxU+90yOEzRjeg4UoyxbByIJEYwH6huTiTUMShgXAsc53DUJHHXV7aMDloSvzYFpi3X/l78ri2JkbxnDTgLUS05PJiXaIDLCjD2'
+              b'ccIpmdVD7tB69cpaxCZSpBi7JS+VUWLg4/kJzHZJnmIsJnQN/qYwj/h/6w6XRqNUcYo+J+Ff6bwr+xrk9e36a1jSrOcNfU4SSzjB'
+              b'H449mcdT0GVrCmXLLe+a8AnJMxKSN2z10Ue1rTDwci7waKiTzN8Mew5sUqXiPqK4cq02wCtmeBZknoHsvlwHkJteH6PgBBEdoqyq'
+              b'FHZzlELeIDJPMt8YdLuwdYoTIp0XrtrCnWVbiFeqTfHUTUHWN92K/b27U/tuadW2AurlMS/RKZVv6hTJzVVtjnTKAHuFHlfShCzR'
+              b'4wVhWm3L9H5ra7HQVFcRGlPIbFMc7U1jlGHobtP7VURraQK+qa4lhG3n3y9spmD8qwibEhX83ypsfxTaH7inXWL3Hv5kdxX+TG6g'
+              b'2J6X/80c00g7ai8yPXO7z8R6WLOH4+WCcWLEStfatNr4h+e8wVVsbHX8x+A1LtgtSvRY43dJ0tE+8Bo7tGM2mUOPDQ1XS5ZjILtn'
+              b'k8NB/nGBhJsUebmWqwf11Aus5ZR+B9aSMleO2S57+VhauXNOcYLdwth9Ft+AjynKzeQBTUEMfTB5oB2baRDR+Q8GR6BIgOmwlssd'
+              b'ghuua5rakT6pzIdJH1nmQyZnaPkwyrFaPlByuXnLLYThN5sXQIXDRRCGO83Gm6D5IP3FIP6iavpL3q3mktUOYh6qlkVSYNEmMDIq'
+              b'Ba4gnKZIGfPxOBzfmYxnEYwCI3HgNezwKYgp1oVXxkspeCMt6US8ncbabFYay6ZUW9q/RRWzkjnzhwgBYpxd/PEzj9sv0pNgYhd+'
+              b'vmNKcVI24EmcolaZwsxh7f/I3eDC0PU72VD3i/2k7FqB2Vg8fb5oL6Qoz70xjd13/w/5C4cF'
+          )
+          with open('pce-only/pce_only.c', 'wb') as output:
+              output.write(zlib.decompress(base64.b64decode(encoded)))
+          PY_FRONTEND_DECODE
+          cat > pce-only/Makefile <<'PCE_FRONTEND_MAKE'
+          EE_BIN = PCE-Fast-Only-PS2.ELF
+          EE_OBJS = pce_only.o usbd.o usbhdfsd.o iomanx.o filexio.o audsrv.o $(PCE_OPTIONAL_OBJS)
+          EE_CFLAGS += -O3 -G0 -Wall -fomit-frame-pointer -funroll-loops -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ -include $(PS2_NEWLIB_SYS_TYPES)
+          EE_CFLAGS += -I$(GSKIT_INCLUDE) -I$(LIBRETRO_INC) -I$(PCE_AUDSRV_INC) -I$(PCE_ZLIB_INCLUDE)
+          EE_LDFLAGS += -L$(GSKIT_LIBDIR) -L$(DMAKIT_LIBDIR) -L$(PS2SDK)/ports/lib
+          EE_LIBS += $(PCE_RAW_LIB) $(PCE_AUDSRV_LIB) $(PCE_VORBIS_LIBS) -lgskit -ldmakit -lpad -lfileXio -lpatches $(PCE_ZLIB_LIB) -lm -lstdc++
+          all: $(EE_BIN)
+          clean:
+          	rm -f $(EE_OBJS) $(EE_BIN)
+          include $(PS2SDK)/samples/Makefile.pref
+          include $(PS2SDK)/samples/Makefile.eeglobal
+          PCE_FRONTEND_MAKE
+          test -s pce-only/pce_only.c
+          grep -q 'retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM)' pce-only/pce_only.c
+          grep -q 'BEFORE WRITE %02u' pce-only/pce_only.c
+          grep -q 'extract_pce_from_zip' pce-only/pce_only.c
+          grep -q 'write_zip_temp_rom' pce-only/pce_only.c
+          grep -q 'PCE ZIP LOAD DIAGNOSTIC' pce-only/pce_only.c
+          grep -q 'RETRO_ENVIRONMENT_GET_LOG_INTERFACE' pce-only/pce_only.c
+          grep -q 'inflateInit2' pce-only/pce_only.c
+          grep -q 'ZIP ROM LOADED' pce-only/pce_only.c
+          grep -q 'decode_cover_png_200' pce-only/pce_only.c
+          grep -q 'mass:/images/' pce-only/pce_only.c || grep -q 'images/' pce-only/pce_only.c
+          grep -q 'title_screen("SELECT GAME")' pce-only/pce_only.c
+          grep -q 'gsKit_prim_sprite_texture(gs,&cover_tex' pce-only/pce_only.c
+          if grep -q 'retro_cheat_set(' pce-only/pce_only.c || grep -q 'retro_cheat_reset(' pce-only/pce_only.c; then
+            echo 'Legacy cheat API calls are forbidden in the RAM-write debug frontend.'
+            exit 1
+          fi
+          test -s pce-only/Makefile
+      - name: Verify generated ZIP and cover source before compiling
+        shell: sh
+        run: |
+          set -eu
+          test -s pce-only/pce_only.c || { echo 'Generated frontend source is missing.'; exit 1; }
+          ZIP_DECL_LINE="$(grep -nF 'static char zip_temp_path[MAX_PATH];' pce-only/pce_only.c | head -n 1 | cut -d: -f1)"
+          UNLOAD_LINE="$(grep -nF 'static void unload_game(void)' pce-only/pce_only.c | head -n 1 | cut -d: -f1)"
+          test -n "$ZIP_DECL_LINE" || { echo 'ERROR: zip_temp_path global declaration is missing from generated source.'; exit 1; }
+          test -n "$UNLOAD_LINE" || { echo 'ERROR: unload_game() is missing from generated source.'; exit 1; }
+          test "$ZIP_DECL_LINE" -lt "$UNLOAD_LINE" || { echo 'ERROR: zip_temp_path declaration is not before unload_game().' ; exit 1; }
+          echo "ZIP path declaration verified at line $ZIP_DECL_LINE."
+          echo "unload_game() verified at line $UNLOAD_LINE."
+          echo "PNG cover code:"
+          grep -nE 'decode_cover_png_200|PNG FOUND|NO MATCH' pce-only/pce_only.c | head -n 12 || true
+      - name: Locate PS2SDK audsrv audio library and IOP module
+        shell: sh
+        run: |
+          set -eu
+          ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          HEADER="$(find "$ROOT" -type f -name audsrv.h -print -quit 2>/dev/null || true)"
+          LIB="$(find "$ROOT" -type f -name libaudsrv.a -print -quit 2>/dev/null || true)"
+          IRX="$(find "$ROOT" -type f -name audsrv.irx -print -quit 2>/dev/null || true)"
+          test -n "$HEADER" && test -s "$HEADER" || { echo 'PS2SDK audsrv.h not found'; exit 1; }
+          test -n "$LIB" && test -s "$LIB" || { echo 'PS2SDK libaudsrv.a not found'; exit 1; }
+          test -n "$IRX" && test -s "$IRX" || { echo 'PS2SDK audsrv.irx not found'; exit 1; }
+          cp "$IRX" pce-only/audsrv.irx
+          printf '%s\n' "$(dirname "$HEADER")" > pce-audsrv-include.txt
+          printf '%s\n' "$LIB" > pce-audsrv-lib.txt
+          echo "Found audsrv header: $HEADER"
+          echo "Found audsrv library: $LIB"
+          echo "Embedded audsrv IRX: $IRX"
+      - name: Embed USB IRX drivers
+        shell: sh
+        run: |
+          set -eu
+          cd pce-only
+          bin2c usbd.irx usbd.c usbd_irx
+          bin2c usbhdfsd.irx usbhdfsd.c usbhdfsd_irx
+          bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
+          bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
+          bin2c audsrv.irx audsrv.c audsrv_irx
+      - name: Locate or build PS2 MIPS static zlib
+        shell: sh
+        run: |
+          set -eu
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          ZLIB_LIB=""
+          for candidate in \
+            "$PS2SDK/ports/lib/libz.a" \
+            "$PS2SDK/ee/lib/libz.a" \
+            "$PS2_ROOT/ee/ports/lib/libz.a"; do
+            if [ -s "$candidate" ]; then ZLIB_LIB="$candidate"; break; fi
+          done
+          if [ -z "$ZLIB_LIB" ]; then
+            ZLIB_LIB="$(find "$PS2_ROOT" -type f -name libz.a -print -quit 2>/dev/null || true)"
+          fi
+          if [ -n "$ZLIB_LIB" ] && [ -s "$ZLIB_LIB" ]; then
+            echo "Found PS2 zlib: $ZLIB_LIB"
+          else
+            echo 'No preinstalled PS2 libz.a. Building static zlib for MIPS R5900.'
+            git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git pce-zlib-src
+            mkdir -p pce-zlib-ps2/obj
+            : > zlib-build.log
+            for source in \
+              adler32.c compress.c crc32.c deflate.c \
+              gzclose.c gzlib.c gzread.c gzwrite.c \
+              infback.c inffast.c inflate.c inftrees.c \
+              trees.c uncompr.c zutil.c; do
+              target="pce-zlib-ps2/obj/${source%.c}.o"
+              echo "Compiling $source" >> zlib-build.log
+              if ! mips64r5900el-ps2-elf-gcc \
+                -O2 -G0 -fno-pic -I pce-zlib-src \
+                -c "pce-zlib-src/$source" -o "$target" >> zlib-build.log 2>&1; then
+                tail -n 100 zlib-build.log
+                exit 1
+              fi
+            done
+            mips64r5900el-ps2-elf-ar rcs pce-zlib-ps2/libz.a pce-zlib-ps2/obj/*.o
+            mips64r5900el-ps2-elf-ranlib pce-zlib-ps2/libz.a
+            ZLIB_LIB="$(pwd)/pce-zlib-ps2/libz.a"
+          fi
+          test -s "$ZLIB_LIB"
+          mips64r5900el-ps2-elf-nm -g --defined-only "$ZLIB_LIB" | grep -Eq '[[:space:]](inflate|deflate|zlibVersion)$' || {
+            echo 'Invalid zlib archive: expected compression functions are absent.'
+            exit 1
+          }
+          ZLIB_HEADER="$(find "$PS2_ROOT" -type f -name zlib.h -print -quit 2>/dev/null || true)"
+          if [ -n "$ZLIB_HEADER" ] && [ -s "$ZLIB_HEADER" ]; then
+            ZLIB_INCLUDE="$(dirname "$ZLIB_HEADER")"
+          else
+            if [ ! -s pce-zlib-src/zlib.h ]; then
+              git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git pce-zlib-src
+            fi
+            ZLIB_INCLUDE="$(pwd)/pce-zlib-src"
+          fi
+          test -s "$ZLIB_INCLUDE/zlib.h" || { echo 'Could not locate zlib.h for ZIP DEFLATE support.'; exit 1; }
+          printf '%s\n' "$ZLIB_LIB" > pce-zlib-path.txt
+          printf '%s\n' "$ZLIB_INCLUDE" > pce-zlib-include.txt
+          echo "zlib headers: $ZLIB_INCLUDE"
+          ls -lh "$ZLIB_LIB"
+      - name: Find native PS2 Vorbis libraries or disable CD-track decoding
+        shell: sh
+        run: |
+          set -eu
+          ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          VF="$(find "$ROOT" -type f -name libvorbisfile.a -print -quit 2>/dev/null || true)"
+          V="$(find "$ROOT" -type f -name libvorbis.a -print -quit 2>/dev/null || true)"
+          O="$(find "$ROOT" -type f -name libogg.a -print -quit 2>/dev/null || true)"
+          if [ -n "$VF" ] && [ -s "$VF" ] && \
+             [ -n "$V" ] && [ -s "$V" ] && \
+             [ -n "$O" ] && [ -s "$O" ] && \
+             mips64r5900el-ps2-elf-nm -g --defined-only "$VF" | grep -Eq '[[:space:]]ov_open_callbacks$'; then
+            echo 'Native PS2 Ogg/Vorbis libraries found; CD audio decoding enabled.'
+            printf '%s %s %s\n' "$VF" "$V" "$O" > pce-vorbis-libs.txt
+            : > pce-vorbis-extra-objects.txt
+            echo 'vorbisfile/native' > pce-vorbis-mode.txt
+          else
+            cat > pce-only/vorbis_no_cd.c <<'PCE_NO_CD_VORBIS_C'
+          /* Cartridge-only experimental build: Ogg CD audio deliberately disabled.
+             These entrypoints are referenced by Mednafen's CD audioreader but
+             must never be used for .pce cartridge games. Always report failure. */
+          #include <stddef.h>
+          int ov_open_callbacks(void *src, void *vf, const char *initial,
+                                long ibytes, void *callbacks) {
+            (void)src; (void)vf; (void)initial; (void)ibytes; (void)callbacks;
+            return -1;
+          }
+          int ov_clear(void *vf) { (void)vf; return 0; }
+          long long ov_pcm_total(void *vf, int stream) {
+            (void)vf; (void)stream; return -1;
+          }
+          long ov_read(void *vf, char *buf, int len, int endian,
+                       int word, int sign, int *bitstream) {
+            (void)vf; (void)buf; (void)len; (void)endian;
+            (void)word; (void)sign; (void)bitstream; return -1;
+          }
+          int ov_pcm_seek(void *vf, long long samples) {
+            (void)vf; (void)samples; return -1;
+          }
+          PCE_NO_CD_VORBIS_C
+            : > pce-vorbis-libs.txt
+            echo 'vorbis_no_cd.o' > pce-vorbis-extra-objects.txt
+            echo 'vorbisfile/stubbed - PCE cartridge only, no CD Ogg' > pce-vorbis-mode.txt
+            echo 'No PS2 Vorbis libraries: CD Ogg disabled; .pce cartridges unaffected.'
+          fi
+          cat pce-vorbis-mode.txt
+      - name: Compile independent PCE-only PS2 ELF
+        shell: sh
+        run: |
+          set -eu
+          RAW="$(pwd)/aurora/build/beetle-pce-fast-src/mednafen_pce_fast_libretro_ps2_raw.a"
+          HEADER="$(find aurora/src/third_party/beetle-pce-fast -name libretro.h -type f | head -n 1)"
+          test -n "$HEADER" && test -s "$HEADER" || {
+            echo 'Missing Libretro public header'; exit 1;
+          }
+          LIBRETRO_INC="$(pwd)/$(dirname "$HEADER")"
+          ZLIB_LIB="$(cat pce-zlib-path.txt)"
+          ZLIB_INCLUDE="$(cat pce-zlib-include.txt)"
+          VORBIS_LIBS="$(cat pce-vorbis-libs.txt)"
+          OPTIONAL_OBJS="$(cat pce-vorbis-extra-objects.txt)"
+          AUDSRV_INC="$(cat pce-audsrv-include.txt)"
+          AUDSRV_LIB="$(cat pce-audsrv-lib.txt)"
+          test -s "$ZLIB_LIB" || { echo 'Missing PS2 zlib static library'; exit 1; }
+          test -s "$ZLIB_INCLUDE/zlib.h" || { echo 'Missing zlib.h include directory'; exit 1; }
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          GSKIT_HEADER="$(find "$PS2_ROOT" -type f -name gsKit.h -print -quit 2>/dev/null || true)"
+          test -n "$GSKIT_HEADER" && test -s "$GSKIT_HEADER" || {
+            echo 'gsKit.h not found in PS2DEV. The ps2dev image is missing gsKit headers.'; exit 1;
+          }
+          GSKIT_INCLUDE="$(dirname "$GSKIT_HEADER")"
+          GSKIT_LIB="$(find "$PS2_ROOT" -type f -name libgskit.a -print -quit 2>/dev/null || true)"
+          DMAKIT_LIB="$(find "$PS2_ROOT" -type f -name libdmakit.a -print -quit 2>/dev/null || true)"
+          test -n "$GSKIT_LIB" && test -s "$GSKIT_LIB" || {
+            echo 'libgskit.a not found in PS2DEV.'; exit 1;
+          }
+          test -n "$DMAKIT_LIB" && test -s "$DMAKIT_LIB" || {
+            echo 'libdmakit.a not found in PS2DEV.'; exit 1;
+          }
+          GSKIT_LIBDIR="$(dirname "$GSKIT_LIB")"
+          DMAKIT_LIBDIR="$(dirname "$DMAKIT_LIB")"
+          echo "Libretro include: $LIBRETRO_INC"
+          echo "gsKit include: $GSKIT_INCLUDE"
+          echo "gsKit library directory: $GSKIT_LIBDIR"
+          echo "dmaKit library directory: $DMAKIT_LIBDIR"
+          echo "MIPS zlib library: $ZLIB_LIB"
+          echo "zlib include directory: $ZLIB_INCLUDE"
+          echo "Vorbis mode: $(cat pce-vorbis-mode.txt)"
+          SYS_TYPES_HEADER="$PS2_ROOT/ee/mips64r5900el-ps2-elf/include/sys/types.h"
+          if [ ! -s "$SYS_TYPES_HEADER" ]; then
+            SYS_TYPES_HEADER="$(find "$PS2_ROOT/ee" -path '*/mips64r5900el-ps2-elf/include/sys/types.h' -type f -print -quit 2>/dev/null || true)"
+          fi
+          test -n "$SYS_TYPES_HEADER" && test -s "$SYS_TYPES_HEADER" || {
+            echo 'Could not locate the PS2 newlib sys/types.h header.'; exit 1;
+          }
+          echo "Using explicit PS2 newlib types header: $SYS_TYPES_HEADER"
+          cat > pce-only/ps2_types_probe.c <<'PS2_TYPES_PROBE'
+          #include <sys/stat.h>
+          #include <sys/time.h>
+          int main(void) { mode_t mode = 0; dev_t device = 0; struct timeval tv = {0, 0}; return (int)mode + (int)device + (int)tv.tv_sec; }
+          PS2_TYPES_PROBE
+          if mips64r5900el-ps2-elf-gcc -D_EE -DNEWLIB_PORT_AWARE \
+            -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ \
+            -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" \
+            -I"$GSKIT_INCLUDE" -I"$LIBRETRO_INC" -I"$AUDSRV_INC" \
+            -include "$SYS_TYPES_HEADER" -fsyntax-only pce-only/ps2_types_probe.c; then
+            echo 'PS2 newlib type preflight passed.'
+          else
+            echo 'PS2 newlib type preflight failed; full ELF build stopped.'
+            exit 1
+          fi
+          if make -C pce-only -j2 \
+            PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" \
+            GSKIT_INCLUDE="$GSKIT_INCLUDE" GSKIT_LIBDIR="$GSKIT_LIBDIR" \
+            DMAKIT_LIBDIR="$DMAKIT_LIBDIR" \
+            PCE_ZLIB_LIB="$ZLIB_LIB" PCE_ZLIB_INCLUDE="$ZLIB_INCLUDE" PCE_VORBIS_LIBS="$VORBIS_LIBS" \
+            PCE_AUDSRV_INC="$AUDSRV_INC" PCE_AUDSRV_LIB="$AUDSRV_LIB" \
+            PCE_OPTIONAL_OBJS="$OPTIONAL_OBJS" PS2_NEWLIB_SYS_TYPES="$SYS_TYPES_HEADER" > frontend-build.log 2>&1; then
+            echo 'Standalone single-core ELF compiled.'
+          else
+            tail -n 180 frontend-build.log
+            exit 1
+          fi
+          test -s pce-only/PCE-Fast-Only-PS2.ELF
+          ls -lh pce-only/PCE-Fast-Only-PS2.ELF
+      - name: Verify ELF and separate core source
+        shell: sh
+        run: |
+          set -eu
+          python3 - <<'PY_CHECK'
+          from pathlib import Path
+          import struct
+          p=Path('pce-only/PCE-Fast-Only-PS2.ELF')
+          b=p.read_bytes()[:20]
+          assert b[:4] == b'\x7fELF', 'Not an ELF'
+          assert b[4:6] == bytes([1,1]), 'Not little-endian ELF32'
+          assert struct.unpack_from('<H',b,18)[0] == 8, 'Not MIPS'
+          print('ELF header validated; gameplay still requires a PS2 test.')
+          PY_CHECK
+      - name: Collect build outputs and diagnostics (always)
+        if: always()
+        shell: sh
+        run: |
+          set +e
+          mkdir -p artifact-staging
+          printf 'Run: %s\nCommit: %s\n' "${GITHUB_RUN_ID:-unknown}" "${GITHUB_SHA:-unknown}" > artifact-staging/run-info.txt
+          for f in \
+            pce-only/PCE-Fast-Only-PS2.ELF \
+            pce-only/pce_only.c \
+            pce-only/Makefile \
+            pce-only/ps2_types_probe.c \
+            pce-only/usbd.irx \
+            pce-only/usbhdfsd.irx \
+            pce-only/audsrv.irx \
+            pce-only/vorbis_no_cd.c \
+            aurora-revision.txt \
+            core-build.log \
+            frontend-build.log \
+            zlib-build.log \
+            pce-zlib-path.txt \
+            pce-zlib-include.txt \
+            pce-symbols.txt \
+            pce-vorbis-mode.txt \
+            pce-vorbis-libs.txt \
+            pce-vorbis-extra-objects.txt \
+            pce-audsrv-include.txt \
+            pce-audsrv-lib.txt \
+            aurora/LICENSE \
+            aurora/LICENSES/Beetle-PCE-Fast-GPL-2.0.txt; do
+            if [ -f "$f" ]; then
+              mkdir -p "artifact-staging/$(dirname "$f")"
+              cp "$f" "artifact-staging/$f"
+            fi
+          done
+          if [ -s artifact-staging/pce-only/PCE-Fast-Only-PS2.ELF ]; then
+            printf 'ELF build output: PRESENT\n' > artifact-staging/ELF-STATUS.txt
+          else
+            printf 'ELF build output: NOT GENERATED; inspect build logs and workflow steps.\n' > artifact-staging/ELF-STATUS.txt
+          fi
+          find artifact-staging -type f -print
+      - name: Upload ELF, source, and diagnostics (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCE-Fast-PS2-V12.2.4-Game-Covers-Display-Names-V4
+          path: artifact-staging/
+          if-no-files-found: error
+          retention-days: 7
