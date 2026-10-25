@@ -715,7 +715,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PCE-Fast-PS2-V12.2.4-Lowercase-Titles-PCE-ZIP-Labels-V5
+          name: PCE-Fast-PS2-V12.2.4-Parentheses-Glyphs-Hide-ZIP-Temp-ROMs-V6
           path: artifact-staging/
           if-no-files-found: error
           retention-days: 7
