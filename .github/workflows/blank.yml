@@ -1,0 +1,610 @@
+name: PCE Fast PS2 V12.2.4 - V12 Audio Restore PS2SDK API Fix
+
+'on':
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build PCE Fast ELF with V12 working audio and PS2SDK API compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: ps2dev/ps2dev:latest
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+      - name: Initialize artifact staging (always available)
+        shell: sh
+        run: |
+          set -eu
+          mkdir -p artifact-staging
+          printf 'Workflow started. Build outputs will be collected even if a later step fails.\n' > artifact-staging/workflow-status.txt
+          cat >> artifact-staging/workflow-status.txt <<'STATUS'
+          Builds from the supplied V9-based source package while preserving the source audio_init() and begin_game() implementations, and embedding the audsrv.irx from the user-confirmed audio-working PCE-Fast-V12.zip after SHA-256 verification. The background header is embedded in the C source package; no background image is required on the USB device. External .cht loading is not implemented in this supplied source; built-in cheats remain as in V9.
+          Existing database: 531 CHT files, 1700 source records, 1599 unique supported byte-write entries. 70 rumble/event records and 33 non-byte/out-of-range records are excluded intentionally.
+          Background support: pcefast_embedded_background.h is supplied inside PCEFAST-V12.2.4-BACKGROUND-CAMINHOS-SOURCE.zip and is compiled with pce_only.c. No background file is needed on the exFAT USB drive.
+          ZIP support: browser lists .pce and .zip; ZIP must contain a .pce member, be single-disk and non-encrypted, and use stored or DEFLATE compression. ZIP and extracted ROM are limited to 8 MiB. If the core requires a full path, extracted ROM is written to a unique temporary .PCE in the same USB folder. PNG cover support: look for 200x200 8-bit non-interlaced RGB/RGBA/indexed PNGs in PCEFAST/images/; filename must match the game filename without .pce/.zip. Browser hides images/ and displays titles only on the left and the cover on the right.
+          STATUS
+      - name: Install tools
+        shell: sh
+        run: |
+          set -eu
+          apk add --no-cache git make python3 build-base unzip binutils
+      - name: Fetch tested PS2 PCE Fast integration
+        shell: sh
+        run: |
+          set -eu
+          git clone --depth 1 https://github.com/itsveenee/SNESticleAurora.git aurora
+          git -C aurora submodule update --init --depth 1 src/third_party/beetle-pce-fast
+          test -s aurora/Makefile
+          test -s aurora/tools/Makefile.beetle-pce-fast-ps2
+          test -s aurora/src/third_party/beetle-pce-fast/libretro.c
+          git -C aurora rev-parse HEAD > aurora-revision.txt
+      - name: Verify Aurora GS-native color layout
+        shell: sh
+        run: |
+          set -eu
+          VIDEO_HEADER=aurora/src/third_party/beetle-pce-fast/mednafen/video.h
+          CORE_MAKEFILE=aurora/tools/Makefile.beetle-pce-fast-ps2
+          test -s "$VIDEO_HEADER" || { echo 'PCE video.h not found'; exit 1; }
+          grep -q 'AURORA_PS2_PCE_FAST' "$VIDEO_HEADER" || { echo 'Expected Aurora PS2 color path not found'; exit 1; }
+          grep -q 'RED_SHIFT   0' "$VIDEO_HEADER" || { echo 'Expected GS-native red bit layout not found'; exit 1; }
+          grep -q 'GREEN_SHIFT 5' "$VIDEO_HEADER" || { echo 'Expected GS-native green bit layout not found'; exit 1; }
+          grep -q 'BLUE_SHIFT  10' "$VIDEO_HEADER" || { echo 'Expected GS-native blue bit layout not found'; exit 1; }
+          grep -q '0x8000u' "$VIDEO_HEADER" || { echo 'Expected opaque alpha bit for GS CT16 not found'; exit 1; }
+          grep -q -- '-DAURORA_PS2_PCE_FAST=1' "$CORE_MAKEFILE" || { echo 'Aurora PS2 core define missing'; exit 1; }
+          grep -q '^DEBUG := 0' "$CORE_MAKEFILE" || { echo 'Release core must have DEBUG := 0'; exit 1; }
+          grep -q -- '-O3' "$CORE_MAKEFILE" || { echo 'Core -O3 optimization flag missing'; exit 1; }
+          grep -q -- '-DNDEBUG' "$CORE_MAKEFILE" || { echo 'Core NDEBUG release flag missing'; exit 1; }
+          grep -q -- '-ffast-math' "$CORE_MAKEFILE" || { echo 'Core optimized math flag missing'; exit 1; }
+          echo 'Verified: source pixels are opaque GS-native A1B5G5R5; direct CT16 upload path is valid.'
+      - name: Build ONLY the original PC Engine core archive
+        shell: sh
+        run: |
+          set -eu
+          BASE="$(pwd)/aurora"
+          TARGET="$BASE/build/pce/beetle_pce_fast_libretro_ps2.a"
+          echo "Building PCE library: $TARGET"
+          if make -C aurora -j2 "$TARGET" > core-build.log 2>&1; then
+            echo 'Original Aurora PCE core build completed.'
+          else
+            echo 'Failed to build the isolated Aurora PCE core.'
+            tail -n 150 core-build.log
+            exit 1
+          fi
+          RAW="$BASE/build/beetle-pce-fast-src/mednafen_pce_fast_libretro_ps2_raw.a"
+          test -s "$RAW" || { echo 'Raw PCE archive was not produced'; exit 1; }
+          mips64r5900el-ps2-elf-nm -g --defined-only "$RAW" > pce-symbols.txt
+          grep -Eq '[[:space:]]retro_run$' pce-symbols.txt || {
+            echo 'Raw archive does not export the expected Libretro API.'
+            exit 1
+          }
+          for symbol in retro_serialize_size retro_serialize retro_unserialize retro_get_memory_data retro_get_memory_size; do
+            grep -Eq "[[:space:]]${symbol}$" pce-symbols.txt || {
+              echo "Required Libretro API missing from core: ${symbol}"
+              exit 1
+            }
+          done
+          echo 'Verified: retro_run, Save/Load State APIs, and safe system-RAM access APIs; frontend avoids retro_cheat_reset/set.'
+          echo 'Save State test: open menu with L1+R1+SELECT; D-pad moves; Cross confirms; Circle returns. Test all five slots on USB exFAT.'
+      - name: Extract USB drivers from supplied V9 source package
+        shell: sh
+        run: |
+          set -eu
+          PKG='PCEFAST-V12.2.4-BACKGROUND-CAMINHOS-640x480-SOURCE.zip'
+          test -s "$PKG" || { echo "Add $PKG to the repository root."; exit 1; }
+          mkdir -p source-package pce-only
+          unzip -q "$PKG" -d source-package
+          BASE='source-package/audit_bg/pce-only'
+          for f in pce_only.c pcefast_embedded_background.h Makefile usbd.irx usbhdfsd.irx; do
+            test -s "$BASE/$f" || { echo "Missing source-package file: $BASE/$f"; exit 1; }
+          done
+          cp "$BASE/pce_only.c" pce-only/pce_only.c
+          cp "$BASE/pcefast_embedded_background.h" pce-only/pcefast_embedded_background.h
+          cp "$BASE/Makefile" pce-only/Makefile
+          cp "$BASE/usbd.irx" pce-only/usbd.irx
+          cp "$BASE/usbhdfsd.irx" pce-only/usbhdfsd.irx
+          echo 'Imported the supplied V9-based source, embedded background header, Makefile, and USB drivers.'
+      - name: Adapt original V9 audio setup to installed PS2SDK audsrv API
+        shell: sh
+        run: |
+          set -eu
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          p = Path('pce-only/pce_only.c')
+          s = p.read_text()
+          pattern = re.compile(
+              r"static int audio_init\\(unsigned requested_rate\\) \\{.*?^\\s*\\}\\n(?=\\s*static unsigned next_pow2)",
+              re.S | re.M
+          )
+          matches = list(pattern.finditer(s))
+          if len(matches) != 1:
+              raise SystemExit(f'Expected exactly one audio_init() function, found {len(matches)}.')
+          replacement = r'''static int audio_init(unsigned requested_rate) {
+            int r;
+            int freq = (int)(requested_rate ? requested_rate : 44100);
+            if(audio_ready) return 0;
+            if(!iop_prepared) {
+              SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
+            }
+            if(!audio_module_loaded) {
+              /* Keep the known-good V12 audsrv.irx and original LIBSD startup sequence. */
+              (void)SifLoadModule("rom0:LIBSD",0,NULL);
+              r=load_mod(audsrv_irx,size_audsrv_irx);
+              if(r<0) { audio_error=r; return r; }
+              audio_module_loaded=1;
+            }
+            if(!audio_rpc_ready) {
+              r=audsrv_init();
+              if(r<0) { audio_error=r; return r; }
+              audio_rpc_ready=1;
+            }
+            /* Current PS2SDK audsrv.h declares audsrv_set_format(freq,bits,channels). */
+            r=audsrv_set_format(freq,16,2);
+            if(r<0 && freq!=44100) { freq=44100; r=audsrv_set_format(freq,16,2); }
+            if(r<0 && freq!=22050) { freq=22050; r=audsrv_set_format(freq,16,2); }
+            if(r<0) { audio_error=r; return r; }
+            r=audsrv_set_volume(90);
+            if(r<0) { audio_error=r; return r; }
+            audio_rate=(unsigned)freq;
+            audio_ready=1; audio_error=0;
+            return 0;
+          }
+          '''
+          s2, count = pattern.subn(replacement, s, count=1)
+          if count != 1:
+              raise SystemExit('Could not replace audio_init() exactly once.')
+          if 'struct audsrv_fmt_t' in s2 or 'audsrv_set_format(&fmt)' in s2:
+              raise SystemExit('Legacy audsrv_fmt_t API remains after compatibility patch.')
+          if s2.count('audsrv_set_format(freq,16,2)') != 3:
+              raise SystemExit('Expected requested-rate plus two fallback audsrv_set_format calls.')
+          p.write_text(s2)
+          print('Patched audio_init() to current PS2SDK audsrv_set_format(freq,16,channels) API; original IRX/init/volume flow retained.')
+          PYCODE
+          ! grep -q 'struct audsrv_fmt_t' pce-only/pce_only.c
+          ! grep -q 'audsrv_set_format(freq,16,2)' pce-only/pce_only.c
+          test "$(grep -o 'audsrv_set_format(freq,16,2)' pce-only/pce_only.c | wc -l | tr -d ' ')" = 3
+
+      - name: Ensure PS2SDK-compatible vsnprintf declaration
+        shell: sh
+        run: |
+          set -eu
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          p = Path('pce-only/pce_only.c')
+          s = p.read_text()
+          # va_list must be declared before the explicit vsnprintf prototype.
+          if '#include <stdarg.h>' not in s:
+              marker = '#include <stdio.h>'
+              if marker in s:
+                  s = s.replace(marker, marker + '\n#include <stdarg.h>', 1)
+              else:
+                  s = '#include <stdarg.h>\n' + s
+          prototype = 'extern int vsnprintf(char *str, size_t size, const char *format, va_list ap);'
+          if prototype not in s:
+              # Place the declaration after standard includes and before frontend declarations.
+              anchor = '#include "pcefast_embedded_background.h"'
+              if anchor in s:
+                  s = s.replace(anchor, anchor + '\n' + prototype, 1)
+              else:
+                  lines = s.splitlines()
+                  last_include = max((i for i, line in enumerate(lines) if line.lstrip().startswith('#include')), default=-1)
+                  lines.insert(last_include + 1, prototype)
+                  s = '\n'.join(lines) + '\n'
+          p.write_text(s)
+          assert '#include <stdarg.h>' in s, 'stdarg.h include missing after patch'
+          assert prototype in s, 'vsnprintf prototype missing after patch'
+          assert s.count(prototype) == 1, 'duplicate vsnprintf prototypes found'
+          print('Applied/verified PS2SDK vsnprintf compatibility declaration.')
+          PYCODE
+          grep -q '^#include <stdarg.h>$' pce-only/pce_only.c
+          grep -q '^extern int vsnprintf(char \*str, size_t size, const char \*format, va_list ap);$' pce-only/pce_only.c
+      - name: Replace PS2SDK ctype table dependencies with local ASCII helpers
+        shell: sh
+        run: |
+          set -eu
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          p = Path('pce-only/pce_only.c')
+          s = p.read_text()
+          old = '#include <ctype.h>'
+          replacement = '''/* Local ASCII-only ctype helpers avoid unresolved PS2SDK newlib symbols. */
+          static int pce_ascii_tolower(int c) {
+            return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+          }
+          static int pce_ascii_toupper(int c) {
+            return (c >= 'a' && c <= 'z') ? c - ('a' - 'A') : c;
+          }
+          static int pce_ascii_isspace(int c) {
+            return c == ' ' || (c >= 9 && c <= 13);
+          }
+          static int pce_ascii_isalnum(int c) {
+            return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+          }
+          #define tolower(c) pce_ascii_tolower((unsigned char)(c))
+          #define toupper(c) pce_ascii_toupper((unsigned char)(c))
+          #define isspace(c) pce_ascii_isspace((unsigned char)(c))
+          #define isalnum(c) pce_ascii_isalnum((unsigned char)(c))
+          '''
+          count = s.count(old)
+          if count != 1:
+              raise SystemExit(f'Expected one ctype.h include, found {count}; source unchanged.')
+          s = s.replace(old, replacement, 1)
+          if '#include <ctype.h>' in s:
+              raise SystemExit('ctype.h include remains after patch')
+          for symbol in ('pce_ascii_tolower', 'pce_ascii_toupper', 'pce_ascii_isspace', 'pce_ascii_isalnum'):
+              if symbol not in s:
+                  raise SystemExit(f'Missing local helper: {symbol}')
+          p.write_text(s)
+          print('Replaced ctype.h with local ASCII helpers.')
+          PYCODE
+          ! grep -q '#include <ctype.h>' pce-only/pce_only.c
+          grep -q 'static int pce_ascii_tolower' pce-only/pce_only.c
+          grep -q 'static int pce_ascii_toupper' pce-only/pce_only.c
+          grep -q 'static int pce_ascii_isspace' pce-only/pce_only.c
+          grep -q 'static int pce_ascii_isalnum' pce-only/pce_only.c
+          echo 'Verified local ASCII helpers; ctype table dependency removed.'
+      - name: Verify original V9 audio implementation is preserved
+        shell: sh
+        run: |
+          set -eu
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          s = Path('pce-only/pce_only.c').read_text()
+          audio = re.search(r"static int audio_init\(unsigned requested_rate\) \{.*?^\s*\}\n(?=\s*static unsigned next_pow2)", s, re.S | re.M)
+          begin = re.search(r"static int begin_game\(const char \*path\) \{.*?^\}\n(?=static void draw_game)", s, re.S | re.M)
+          if not audio or not begin:
+              raise SystemExit('Original V9 audio_init/begin_game implementation not found.')
+          a = audio.group()
+          b = begin.group()
+          required_audio = ('load_mod(audsrv_irx,size_audsrv_irx)', 'audsrv_init()', 'audsrv_set_format(freq,16,2)', 'audsrv_set_volume(90)')
+          for token in required_audio:
+              if token not in a:
+                  raise SystemExit(f'Original V9 audio call missing: {token}')
+          if 'retro_get_system_av_info(&av);' not in b or 'audio_init((unsigned)(av.timing.sample_rate+0.5))' not in b or 'audio_init(44100)' not in b:
+              raise SystemExit('Original V9 audio initialization call sequence is missing.')
+          if b.index('audio_init(') > b.index('retro_load_game(&game)'):
+              raise SystemExit('Unexpected audio call order; expected original V9 order before retro_load_game.')
+          if 'show_load_debug' in s or 'AUDIO BYPASSED' in s or 'FORMAT SKIP' in s:
+              raise SystemExit('Experimental audio/debug patch remains in source.')
+          print('Verified: V9 audio module/init/volume flow and begin_game() order are preserved; audsrv format call adapted to current PS2SDK API.')
+          PYCODE
+          grep -q 'audsrv_set_format(freq,16,2)' pce-only/pce_only.c
+          grep -q 'audsrv_set_volume(90)' pce-only/pce_only.c
+          ! grep -q 'AUDIO BYPASSED' pce-only/pce_only.c
+          ! grep -q 'AUDSRV FORMAT SKIP' pce-only/pce_only.c
+      - name: Prepare supplied PCE Fast V12.2.4 frontend source
+        shell: sh
+        run: |
+          set -eu
+          test -s pce-only/pce_only.c
+          test -s pce-only/pcefast_embedded_background.h
+          grep -q 'init_embedded_background' pce-only/pce_only.c || { echo 'Embedded background initializer missing.'; exit 1; }
+          grep -q 'pcefast_embedded_background' pce-only/pce_only.c || { echo 'Embedded background header is not referenced by C source.'; exit 1; }
+          grep -q 'PCEFAST/pcengine roms/' pce-only/pce_only.c || { echo 'Expected PCEFAST/pcengine roms path missing.'; exit 1; }
+          grep -q 'PCEFAST/images/' pce-only/pce_only.c || { echo 'Expected PCEFAST/images path missing.'; exit 1; }
+          grep -q 'PCEFAST/STATES' pce-only/pce_only.c || { echo 'Expected PCEFAST/STATES path missing.'; exit 1; }
+          grep -q '^#define PCEFAST_BG_WIDTH 640$' pce-only/pcefast_embedded_background.h || { echo 'Background width must be 640.'; exit 1; }
+          grep -q '^#define PCEFAST_BG_HEIGHT 480$' pce-only/pcefast_embedded_background.h || { echo 'Background height must be 480.'; exit 1; }
+          grep -q 'PCEFAST_BG_RAW_SIZE (PCEFAST_BG_WIDTH \* PCEFAST_BG_HEIGHT \* 2u)' pce-only/pcefast_embedded_background.h || { echo 'Background raw size formula missing.'; exit 1; }
+          echo 'Supplied source contains 640x480 embedded background, requested ROM/cover/state paths, and original V9 audio implementation.'
+      - name: Verify source package before compiling
+        shell: sh
+        run: |
+          set -eu
+          test -s pce-only/pce_only.c
+          test -s pce-only/pcefast_embedded_background.h
+          test -s pce-only/Makefile
+          test -s pce-only/usbd.irx
+          test -s pce-only/usbhdfsd.irx
+          grep -q 'init_embedded_background' pce-only/pce_only.c
+          grep -q 'draw_embedded_background' pce-only/pce_only.c
+          grep -q 'PCEFAST/pcengine roms/' pce-only/pce_only.c
+          grep -q 'PCEFAST/images/' pce-only/pce_only.c
+          grep -q 'PCEFAST/STATES' pce-only/pce_only.c
+          echo 'Source package preflight passed. This validates source markers only; compilation and PS2 runtime remain to be tested.'
+      - name: Use the audio module from the confirmed working PCE-Fast-V12 package
+        shell: sh
+        run: |
+          set -eu
+          ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          HEADER="$(find "$ROOT" -type f -name audsrv.h -print -quit 2>/dev/null || true)"
+          LIB="$(find "$ROOT" -type f -name libaudsrv.a -print -quit 2>/dev/null || true)"
+          test -n "$HEADER" && test -s "$HEADER" || { echo 'PS2SDK audsrv.h not found'; exit 1; }
+          test -n "$LIB" && test -s "$LIB" || { echo 'PS2SDK libaudsrv.a not found'; exit 1; }
+          WORKING_PKG='PCE-Fast-V12.zip'
+          test -s "$WORKING_PKG" || { echo "Add $WORKING_PKG to the repository root (confirmed audio-working reference)."; exit 1; }
+          mkdir -p known-good-audio
+          unzip -q "$WORKING_PKG" 'PCE-Fast-V12/audsrv.irx' -d known-good-audio
+          KNOWN_IRX='known-good-audio/PCE-Fast-V12/audsrv.irx'
+          test -s "$KNOWN_IRX" || { echo 'Known-good audsrv.irx missing from PCE-Fast-V12.zip'; exit 1; }
+          EXPECTED_IRX_SHA='be7dbc68b9d8e2ae27c6250c0abd1f93fab6b8c0dc3c44cd7defd167f7a4786b'
+          ACTUAL_IRX_SHA="$(sha256sum "$KNOWN_IRX" | awk '{print $1}')"
+          test "$ACTUAL_IRX_SHA" = "$EXPECTED_IRX_SHA" || { echo "Known-good audsrv.irx hash mismatch: $ACTUAL_IRX_SHA"; exit 1; }
+          cp "$KNOWN_IRX" pce-only/audsrv.irx
+          printf '%s\\n' "$(dirname "$HEADER")" > pce-audsrv-include.txt
+          printf '%s\\n' "$LIB" > pce-audsrv-lib.txt
+          printf '%s\\n' "$ACTUAL_IRX_SHA" > pce-audsrv-irx-sha256.txt
+          echo "Found audsrv header: $HEADER"
+          echo "Found audsrv library: $LIB"
+          echo "Embedded known-good V12 audsrv.irx: $ACTUAL_IRX_SHA"
+      - name: Embed USB IRX drivers
+        shell: sh
+        run: |
+          set -eu
+          cd pce-only
+          bin2c usbd.irx usbd.c usbd_irx
+          bin2c usbhdfsd.irx usbhdfsd.c usbhdfsd_irx
+          bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
+          bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
+          bin2c audsrv.irx audsrv.c audsrv_irx
+      - name: Locate or build PS2 MIPS static zlib
+        shell: sh
+        run: |
+          set -eu
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          ZLIB_LIB=""
+          for candidate in \
+            "$PS2SDK/ports/lib/libz.a" \
+            "$PS2SDK/ee/lib/libz.a" \
+            "$PS2_ROOT/ee/ports/lib/libz.a"; do
+            if [ -s "$candidate" ]; then ZLIB_LIB="$candidate"; break; fi
+          done
+          if [ -z "$ZLIB_LIB" ]; then
+            ZLIB_LIB="$(find "$PS2_ROOT" -type f -name libz.a -print -quit 2>/dev/null || true)"
+          fi
+          if [ -n "$ZLIB_LIB" ] && [ -s "$ZLIB_LIB" ]; then
+            echo "Found PS2 zlib: $ZLIB_LIB"
+          else
+            echo 'No preinstalled PS2 libz.a. Building static zlib for MIPS R5900.'
+            git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git pce-zlib-src
+            mkdir -p pce-zlib-ps2/obj
+            : > zlib-build.log
+            for source in \
+              adler32.c compress.c crc32.c deflate.c \
+              gzclose.c gzlib.c gzread.c gzwrite.c \
+              infback.c inffast.c inflate.c inftrees.c \
+              trees.c uncompr.c zutil.c; do
+              target="pce-zlib-ps2/obj/${source%.c}.o"
+              echo "Compiling $source" >> zlib-build.log
+              if ! mips64r5900el-ps2-elf-gcc \
+                -O2 -G0 -fno-pic -I pce-zlib-src \
+                -c "pce-zlib-src/$source" -o "$target" >> zlib-build.log 2>&1; then
+                tail -n 100 zlib-build.log
+                exit 1
+              fi
+            done
+            mips64r5900el-ps2-elf-ar rcs pce-zlib-ps2/libz.a pce-zlib-ps2/obj/*.o
+            mips64r5900el-ps2-elf-ranlib pce-zlib-ps2/libz.a
+            ZLIB_LIB="$(pwd)/pce-zlib-ps2/libz.a"
+          fi
+          test -s "$ZLIB_LIB"
+          mips64r5900el-ps2-elf-nm -g --defined-only "$ZLIB_LIB" | grep -Eq '[[:space:]](inflate|deflate|zlibVersion)$' || {
+            echo 'Invalid zlib archive: expected compression functions are absent.'
+            exit 1
+          }
+          ZLIB_HEADER="$(find "$PS2_ROOT" -type f -name zlib.h -print -quit 2>/dev/null || true)"
+          if [ -n "$ZLIB_HEADER" ] && [ -s "$ZLIB_HEADER" ]; then
+            ZLIB_INCLUDE="$(dirname "$ZLIB_HEADER")"
+          else
+            if [ ! -s pce-zlib-src/zlib.h ]; then
+              git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git pce-zlib-src
+            fi
+            ZLIB_INCLUDE="$(pwd)/pce-zlib-src"
+          fi
+          test -s "$ZLIB_INCLUDE/zlib.h" || { echo 'Could not locate zlib.h for ZIP DEFLATE support.'; exit 1; }
+          printf '%s\n' "$ZLIB_LIB" > pce-zlib-path.txt
+          printf '%s\n' "$ZLIB_INCLUDE" > pce-zlib-include.txt
+          echo "zlib headers: $ZLIB_INCLUDE"
+          ls -lh "$ZLIB_LIB"
+      - name: Find native PS2 Vorbis libraries or disable CD-track decoding
+        shell: sh
+        run: |
+          set -eu
+          ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          VF="$(find "$ROOT" -type f -name libvorbisfile.a -print -quit 2>/dev/null || true)"
+          V="$(find "$ROOT" -type f -name libvorbis.a -print -quit 2>/dev/null || true)"
+          O="$(find "$ROOT" -type f -name libogg.a -print -quit 2>/dev/null || true)"
+          if [ -n "$VF" ] && [ -s "$VF" ] && \
+             [ -n "$V" ] && [ -s "$V" ] && \
+             [ -n "$O" ] && [ -s "$O" ] && \
+             mips64r5900el-ps2-elf-nm -g --defined-only "$VF" | grep -Eq '[[:space:]]ov_open_callbacks$'; then
+            echo 'Native PS2 Ogg/Vorbis libraries found; CD audio decoding enabled.'
+            printf '%s %s %s\n' "$VF" "$V" "$O" > pce-vorbis-libs.txt
+            : > pce-vorbis-extra-objects.txt
+            echo 'vorbisfile/native' > pce-vorbis-mode.txt
+          else
+            cat > pce-only/vorbis_no_cd.c <<'PCE_NO_CD_VORBIS_C'
+          /* Cartridge-only experimental build: Ogg CD audio deliberately disabled.
+             These entrypoints are referenced by Mednafen's CD audioreader but
+             must never be used for .pce cartridge games. Always report failure. */
+          #include <stddef.h>
+          int ov_open_callbacks(void *src, void *vf, const char *initial,
+                                long ibytes, void *callbacks) {
+            (void)src; (void)vf; (void)initial; (void)ibytes; (void)callbacks;
+            return -1;
+          }
+          int ov_clear(void *vf) { (void)vf; return 0; }
+          long long ov_pcm_total(void *vf, int stream) {
+            (void)vf; (void)stream; return -1;
+          }
+          long ov_read(void *vf, char *buf, int len, int endian,
+                       int word, int sign, int *bitstream) {
+            (void)vf; (void)buf; (void)len; (void)endian;
+            (void)word; (void)sign; (void)bitstream; return -1;
+          }
+          int ov_pcm_seek(void *vf, long long samples) {
+            (void)vf; (void)samples; return -1;
+          }
+          PCE_NO_CD_VORBIS_C
+            : > pce-vorbis-libs.txt
+            echo 'vorbis_no_cd.o' > pce-vorbis-extra-objects.txt
+            echo 'vorbisfile/stubbed - PCE cartridge only, no CD Ogg' > pce-vorbis-mode.txt
+            echo 'No PS2 Vorbis libraries: CD Ogg disabled; .pce cartridges unaffected.'
+          fi
+          cat pce-vorbis-mode.txt
+      - name: Compile independent PCE-only PS2 ELF
+        shell: sh
+        run: |
+          set -eu
+          RAW="$(pwd)/aurora/build/beetle-pce-fast-src/mednafen_pce_fast_libretro_ps2_raw.a"
+          HEADER="$(find aurora/src/third_party/beetle-pce-fast -name libretro.h -type f | head -n 1)"
+          test -n "$HEADER" && test -s "$HEADER" || {
+            echo 'Missing Libretro public header'; exit 1;
+          }
+          LIBRETRO_INC="$(pwd)/$(dirname "$HEADER")"
+          ZLIB_LIB="$(cat pce-zlib-path.txt)"
+          ZLIB_INCLUDE="$(cat pce-zlib-include.txt)"
+          VORBIS_LIBS="$(cat pce-vorbis-libs.txt)"
+          OPTIONAL_OBJS="$(cat pce-vorbis-extra-objects.txt)"
+          AUDSRV_INC="$(cat pce-audsrv-include.txt)"
+          AUDSRV_LIB="$(cat pce-audsrv-lib.txt)"
+          test -s "$ZLIB_LIB" || { echo 'Missing PS2 zlib static library'; exit 1; }
+          test -s "$ZLIB_INCLUDE/zlib.h" || { echo 'Missing zlib.h include directory'; exit 1; }
+          PS2_ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          GSKIT_HEADER="$(find "$PS2_ROOT" -type f -name gsKit.h -print -quit 2>/dev/null || true)"
+          test -n "$GSKIT_HEADER" && test -s "$GSKIT_HEADER" || {
+            echo 'gsKit.h not found in PS2DEV. The ps2dev image is missing gsKit headers.'; exit 1;
+          }
+          GSKIT_INCLUDE="$(dirname "$GSKIT_HEADER")"
+          GSKIT_LIB="$(find "$PS2_ROOT" -type f -name libgskit.a -print -quit 2>/dev/null || true)"
+          DMAKIT_LIB="$(find "$PS2_ROOT" -type f -name libdmakit.a -print -quit 2>/dev/null || true)"
+          test -n "$GSKIT_LIB" && test -s "$GSKIT_LIB" || {
+            echo 'libgskit.a not found in PS2DEV.'; exit 1;
+          }
+          test -n "$DMAKIT_LIB" && test -s "$DMAKIT_LIB" || {
+            echo 'libdmakit.a not found in PS2DEV.'; exit 1;
+          }
+          GSKIT_LIBDIR="$(dirname "$GSKIT_LIB")"
+          DMAKIT_LIBDIR="$(dirname "$DMAKIT_LIB")"
+          echo "Libretro include: $LIBRETRO_INC"
+          echo "gsKit include: $GSKIT_INCLUDE"
+          echo "gsKit library directory: $GSKIT_LIBDIR"
+          echo "dmaKit library directory: $DMAKIT_LIBDIR"
+          echo "MIPS zlib library: $ZLIB_LIB"
+          echo "zlib include directory: $ZLIB_INCLUDE"
+          echo "Vorbis mode: $(cat pce-vorbis-mode.txt)"
+          SYS_TYPES_HEADER="$PS2_ROOT/ee/mips64r5900el-ps2-elf/include/sys/types.h"
+          if [ ! -s "$SYS_TYPES_HEADER" ]; then
+            SYS_TYPES_HEADER="$(find "$PS2_ROOT/ee" -path '*/mips64r5900el-ps2-elf/include/sys/types.h' -type f -print -quit 2>/dev/null || true)"
+          fi
+          test -n "$SYS_TYPES_HEADER" && test -s "$SYS_TYPES_HEADER" || {
+            echo 'Could not locate the PS2 newlib sys/types.h header.'; exit 1;
+          }
+          echo "Using explicit PS2 newlib types header: $SYS_TYPES_HEADER"
+          cat > pce-only/ps2_types_probe.c <<'PS2_TYPES_PROBE'
+          #include <sys/stat.h>
+          #include <sys/time.h>
+          int main(void) { mode_t mode = 0; dev_t device = 0; struct timeval tv = {0, 0}; return (int)mode + (int)device + (int)tv.tv_sec; }
+          PS2_TYPES_PROBE
+          if mips64r5900el-ps2-elf-gcc -D_EE -DNEWLIB_PORT_AWARE \
+            -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ \
+            -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" \
+            -I"$GSKIT_INCLUDE" -I"$LIBRETRO_INC" -I"$AUDSRV_INC" \
+            -include "$SYS_TYPES_HEADER" -fsyntax-only pce-only/ps2_types_probe.c; then
+            echo 'PS2 newlib type preflight passed.'
+          else
+            echo 'PS2 newlib type preflight failed; full ELF build stopped.'
+            exit 1
+          fi
+          if make -C pce-only -j2 \
+            PCE_RAW_LIB="$RAW" LIBRETRO_INC="$LIBRETRO_INC" \
+            GSKIT_INCLUDE="$GSKIT_INCLUDE" GSKIT_LIBDIR="$GSKIT_LIBDIR" \
+            DMAKIT_LIBDIR="$DMAKIT_LIBDIR" \
+            PCE_ZLIB_LIB="$ZLIB_LIB" PCE_ZLIB_INCLUDE="$ZLIB_INCLUDE" PCE_VORBIS_LIBS="$VORBIS_LIBS" \
+            PCE_AUDSRV_INC="$AUDSRV_INC" PCE_AUDSRV_LIB="$AUDSRV_LIB" \
+            PCE_OPTIONAL_OBJS="$OPTIONAL_OBJS" PS2_NEWLIB_SYS_TYPES="$SYS_TYPES_HEADER" > frontend-build.log 2>&1; then
+            echo 'Standalone single-core ELF compiled.'
+          else
+            tail -n 180 frontend-build.log
+            exit 1
+          fi
+          test -s pce-only/PCE-Fast-Only-PS2.ELF
+          ls -lh pce-only/PCE-Fast-Only-PS2.ELF
+      - name: Verify ELF and separate core source
+        shell: sh
+        run: |
+          set -eu
+          python3 - <<'PY_CHECK'
+          from pathlib import Path
+          import struct
+          p=Path('pce-only/PCE-Fast-Only-PS2.ELF')
+          b=p.read_bytes()[:20]
+          assert b[:4] == b'\x7fELF', 'Not an ELF'
+          assert b[4:6] == bytes([1,1]), 'Not little-endian ELF32'
+          assert struct.unpack_from('<H',b,18)[0] == 8, 'Not MIPS'
+          print('ELF header validated; gameplay still requires a PS2 test.')
+          PY_CHECK
+      - name: Collect release build outputs (always)
+        if: always()
+        shell: sh
+        run: |
+          set +e
+          mkdir -p artifact-staging
+          printf 'Run: %s\nCommit: %s\n' "${GITHUB_RUN_ID:-unknown}" "${GITHUB_SHA:-unknown}" > artifact-staging/run-info.txt
+          cat > artifact-staging/CHT-DATABASE-REPORT.txt <<'CHT_REPORT'
+          Source archive: Pc Engine Cheats.zip
+          CHT files found: 531
+          Source cheat records: 1700
+          Unique supported byte-write entries embedded: 1599
+          Rumble/event entries skipped: 70
+          Unsupported or out-of-range entries skipped: 33
+          All cheats default OFF. Matching uses the ROM basename (without .pce/.zip).
+          Existing 14 Splatterhouse options preserved.
+          External CHT test: Ninja Spirit (USA).zip
+          V12 release: diagnostic overlays/counters are disabled; external CHT loading and the background fallback remain available.
+          Release optimization: core already uses DEBUG=0, -O3, -DNDEBUG, -ffast-math, inlining, loop unrolling and section splitting; frontend uses -O3, -DNDEBUG, frame-pointer omission, loop unrolling and linker section garbage collection.
+          External file: artifact-staging/PCEFAST/cheats/Ninja Spirit (USA).cht
+          Search order: mass:/PCEFAST/cheats, mass0:/PCEFAST/cheats, mass:/cheats, mass0:/cheats, game-folder/cheats
+          CHT_REPORT
+          for f in \
+            pce-only/PCE-Fast-Only-PS2.ELF \
+            pce-only/pce_only.c \
+            pce-only/pcefast_embedded_background.h \
+            pce-only/Makefile \
+            pce-only/ps2_types_probe.c \
+            pce-only/usbd.irx \
+            pce-only/usbhdfsd.irx \
+            pce-only/audsrv.irx \
+            pce-only/vorbis_no_cd.c \
+            aurora-revision.txt \
+            core-build.log \
+            frontend-build.log \
+            zlib-build.log \
+            pce-zlib-path.txt \
+            pce-zlib-include.txt \
+            pce-symbols.txt \
+            pce-vorbis-mode.txt \
+            pce-vorbis-libs.txt \
+            pce-vorbis-extra-objects.txt \
+            pce-audsrv-include.txt \
+            pce-audsrv-lib.txt \
+            aurora/LICENSE \
+            aurora/LICENSES/Beetle-PCE-Fast-GPL-2.0.txt; do
+            if [ -f "$f" ]; then
+              mkdir -p "artifact-staging/$(dirname "$f")"
+              cp "$f" "artifact-staging/$f"
+            fi
+          done
+          if [ -s artifact-staging/pce-only/PCE-Fast-Only-PS2.ELF ]; then
+            printf 'ELF build output: PRESENT\n' > artifact-staging/ELF-STATUS.txt
+          else
+            printf 'ELF build output: NOT GENERATED; inspect build logs and workflow steps.\n' > artifact-staging/ELF-STATUS.txt
+          fi
+          find artifact-staging -type f -print
+      - name: Upload release ELF, source, and build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCE-Fast-PS2-V12.2.4-Release-Optimized-Background-PNG-V12
+          path: artifact-staging/
+          if-no-files-found: error
+          retention-days: 7
