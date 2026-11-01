@@ -1,0 +1,222 @@
+name: FCEUmm Interface Edition - No Core
+
+'on':
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build FCEUmm interface-only PS2 ELF
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: ps2dev/ps2dev:latest
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Initialize artifact staging
+        shell: sh
+        run: |
+          set -eu
+          mkdir -p artifact-staging
+          printf '%s\n' 'FCEUmm Interface Edition - no emulation core is included.' > artifact-staging/workflow-status.txt
+
+      - name: Verify source, paths, background and tested drivers
+        shell: sh
+        run: |
+          set -eu
+          test -s src/fceumm_interface.c
+          test -s src/Makefile
+          test -s assets/background.png
+          test -s tools/embed_background.py
+          test -s assets/usbd.irx
+          test -s assets/usbhdfsd.irx
+          test -s assets/audsrv.irx
+
+          # This edition must not compile, link, or call any Libretro/core API.
+          if grep -nE 'retro_|RETRO_|libretro\.h|QuickNES|Beetle-PCE|SNESticleAurora' src/fceumm_interface.c; then
+            echo 'Unexpected emulator-core dependency found in interface-only source.'
+            exit 1
+          fi
+
+          grep -Fq 'FCEUmm/nes roms/' src/fceumm_interface.c
+          grep -Fq 'FCEUmm/images/' src/fceumm_interface.c
+          grep -Fq 'FCEUmm/cheats' src/fceumm_interface.c
+          grep -Fq 'FCEUmm/STATES' src/fceumm_interface.c
+          grep -Fq 'mass:/FCEUmm/nes roms/' src/fceumm_interface.c
+          grep -Fq 'mass0:/FCEUmm/nes roms/' src/fceumm_interface.c
+
+          # Exact hash of the user-supplied 4:3 background image.
+          echo 'a1c43e0891ce322fcbb13f55a8707302a617124577bbf00acb2542639259279e  assets/background.png' | sha256sum -c -
+
+          # Exact IRX hashes from the previously tested PCE Fast V12 package.
+          echo 'be7dbc68b9d8e2ae27c6250c0abd1f93fab6b8c0dc3c44cd7defd167f7a4786b  assets/audsrv.irx' | sha256sum -c -
+          echo '5ea4818ba1cf5207f6d7cadb4c13b5afa88c37c260750c21155b079a8c18f369  assets/usbd.irx' | sha256sum -c -
+          echo '70a369e47745e7f995fa771edbbfed086727b759fba915a7070c0fbcf061dd34  assets/usbhdfsd.irx' | sha256sum -c -
+
+          echo 'Preflight passed: no core symbols, correct FCEUmm USB paths, 640x480 background and tested IRX files.'
+
+      - name: Install build utilities
+        shell: sh
+        run: |
+          set -eu
+          apk add --no-cache git make python3 py3-pillow build-base unzip binutils
+
+      - name: Generate embedded background from supplied PNG
+        shell: sh
+        run: |
+          set -eu
+          python3 tools/embed_background.py assets/background.png src/fceumm_embedded_background.h
+          grep -q '^#define PCEFAST_BG_WIDTH 640$' src/fceumm_embedded_background.h
+          grep -q '^#define PCEFAST_BG_HEIGHT 480$' src/fceumm_embedded_background.h
+          grep -q 'PCEFAST_BG_RAW_SIZE (PCEFAST_BG_WIDTH \* PCEFAST_BG_HEIGHT \* 2u)' src/fceumm_embedded_background.h
+          sha256sum assets/background.png > artifact-staging/background-source.sha256
+          echo 'Background converted to 640x480 GS-native A1B5G5R5 and embedded in the ELF.'
+
+      - name: Build standalone interface ELF without any emulator core
+        shell: sh
+        run: |
+          set -eu
+          ROOT="${PS2DEV:-/usr/local/ps2dev}"
+          : > artifact-staging/build.log
+
+          AUDSRV_HEADER="$(find "$ROOT" -type f -name audsrv.h -print -quit 2>/dev/null || true)"
+          AUDSRV_LIB="$(find "$ROOT" -type f -name libaudsrv.a -print -quit 2>/dev/null || true)"
+          GSKIT_HEADER="$(find "$ROOT" -type f -name gsKit.h -print -quit 2>/dev/null || true)"
+          GSKIT_LIB="$(find "$ROOT" -type f -name libgskit.a -print -quit 2>/dev/null || true)"
+          DMAKIT_LIB="$(find "$ROOT" -type f -name libdmakit.a -print -quit 2>/dev/null || true)"
+
+          test -n "$AUDSRV_HEADER" && test -s "$AUDSRV_HEADER" || { echo 'PS2SDK audsrv.h not found'; exit 1; }
+          test -n "$AUDSRV_LIB" && test -s "$AUDSRV_LIB" || { echo 'PS2SDK libaudsrv.a not found'; exit 1; }
+          test -n "$GSKIT_HEADER" && test -s "$GSKIT_HEADER" || { echo 'PS2SDK gsKit.h not found'; exit 1; }
+          test -n "$GSKIT_LIB" && test -s "$GSKIT_LIB" || { echo 'PS2SDK libgskit.a not found'; exit 1; }
+          test -n "$DMAKIT_LIB" && test -s "$DMAKIT_LIB" || { echo 'PS2SDK libdmakit.a not found'; exit 1; }
+
+          AUDSRV_INC="$(dirname "$AUDSRV_HEADER")"
+          AUDSRV_LIBDIR="$(dirname "$AUDSRV_LIB")"
+          GSKIT_INCLUDE="$(dirname "$GSKIT_HEADER")"
+          GSKIT_LIBDIR="$(dirname "$GSKIT_LIB")"
+          DMAKIT_LIBDIR="$(dirname "$DMAKIT_LIB")"
+
+          # Reuse the exact USB and audsrv IRX drivers carried by the tested PCE Fast build.
+          cp assets/usbd.irx src/usbd.irx
+          cp assets/usbhdfsd.irx src/usbhdfsd.irx
+          cp assets/audsrv.irx src/audsrv.irx
+          cd src
+          bin2c usbd.irx usbd.c usbd_irx
+          bin2c usbhdfsd.irx usbhdfsd.c usbhdfsd_irx
+          bin2c "$PS2SDK/iop/irx/iomanX.irx" iomanx.c iomanx_irx
+          bin2c "$PS2SDK/iop/irx/fileXio.irx" filexio.c filexio_irx
+          bin2c audsrv.irx audsrv.c audsrv_irx
+          cd ..
+
+          # Locate PS2 zlib or build a static MIPS R5900 copy for ZIP/PNG handling.
+          ZLIB_LIB=""
+          for candidate in \
+            "$PS2SDK/ports/lib/libz.a" \
+            "$PS2SDK/ee/lib/libz.a" \
+            "$ROOT/ee/ports/lib/libz.a"; do
+            if [ -s "$candidate" ]; then ZLIB_LIB="$candidate"; break; fi
+          done
+          if [ -z "$ZLIB_LIB" ]; then
+            ZLIB_LIB="$(find "$ROOT" -type f -name libz.a -print -quit 2>/dev/null || true)"
+          fi
+          if [ -z "$ZLIB_LIB" ] || [ ! -s "$ZLIB_LIB" ]; then
+            echo 'No PS2 libz.a found; building zlib 1.3.1 for MIPS R5900.'
+            git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git zlib-src
+            mkdir -p zlib-ps2/obj
+            for source in \
+              adler32.c compress.c crc32.c deflate.c \
+              gzclose.c gzlib.c gzread.c gzwrite.c \
+              infback.c inffast.c inflate.c inftrees.c \
+              trees.c uncompr.c zutil.c; do
+              target="zlib-ps2/obj/${source%.c}.o"
+              if ! mips64r5900el-ps2-elf-gcc -O2 -G0 -fno-pic -I zlib-src -c "zlib-src/$source" -o "$target" >> artifact-staging/build.log 2>&1; then
+                tail -n 120 artifact-staging/build.log
+                exit 1
+              fi
+            done
+            mips64r5900el-ps2-elf-ar rcs zlib-ps2/libz.a zlib-ps2/obj/*.o
+            mips64r5900el-ps2-elf-ranlib zlib-ps2/libz.a
+            ZLIB_LIB="$(pwd)/zlib-ps2/libz.a"
+          fi
+          test -s "$ZLIB_LIB"
+          mips64r5900el-ps2-elf-nm -g --defined-only "$ZLIB_LIB" | grep -Eq '[[:space:]](inflate|deflate|zlibVersion)$'
+
+          ZLIB_HEADER="$(find "$ROOT" -type f -name zlib.h -print -quit 2>/dev/null || true)"
+          if [ -n "$ZLIB_HEADER" ] && [ -s "$ZLIB_HEADER" ]; then
+            ZLIB_INCLUDE="$(dirname "$ZLIB_HEADER")"
+          else
+            test -s zlib-src/zlib.h || git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git zlib-src
+            ZLIB_INCLUDE="$(pwd)/zlib-src"
+          fi
+          test -s "$ZLIB_INCLUDE/zlib.h"
+
+          SYS_TYPES_HEADER="$ROOT/ee/mips64r5900el-ps2-elf/include/sys/types.h"
+          if [ ! -s "$SYS_TYPES_HEADER" ]; then
+            SYS_TYPES_HEADER="$(find "$ROOT/ee" -path '*/mips64r5900el-ps2-elf/include/sys/types.h' -type f -print -quit 2>/dev/null || true)"
+          fi
+          test -n "$SYS_TYPES_HEADER" && test -s "$SYS_TYPES_HEADER" || { echo 'PS2 newlib sys/types.h not found'; exit 1; }
+
+          if ! mips64r5900el-ps2-elf-gcc -D_EE -DNEWLIB_PORT_AWARE \
+            -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__ \
+            -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" \
+            -I"$GSKIT_INCLUDE" -I"$AUDSRV_INC" -I"$ZLIB_INCLUDE" \
+            -include "$SYS_TYPES_HEADER" -fsyntax-only src/ps2_types_probe.c >> artifact-staging/build.log 2>&1; then
+            tail -n 120 artifact-staging/build.log
+            exit 1
+          fi
+
+          if ! make -C src -j2 \
+            GSKIT_INCLUDE="$GSKIT_INCLUDE" GSKIT_LIBDIR="$GSKIT_LIBDIR" \
+            DMAKIT_LIBDIR="$DMAKIT_LIBDIR" \
+            AUDSRV_INC="$AUDSRV_INC" AUDSRV_LIBDIR="$AUDSRV_LIBDIR" \
+            FCEU_ZLIB_LIB="$ZLIB_LIB" FCEU_ZLIB_INCLUDE="$ZLIB_INCLUDE" \
+            PS2_NEWLIB_SYS_TYPES="$SYS_TYPES_HEADER" >> artifact-staging/build.log 2>&1; then
+            tail -n 180 artifact-staging/build.log
+            exit 1
+          fi
+
+          test -s src/FCEUmm-Interface-Only-PS2.ELF
+          mips64r5900el-ps2-elf-nm -u src/FCEUmm-Interface-Only-PS2.ELF > artifact-staging/undefined-symbols.txt
+          if grep -E 'retro_|RETRO_' artifact-staging/undefined-symbols.txt; then
+            echo 'Unexpected Libretro/core symbol in interface-only ELF.'
+            exit 1
+          fi
+
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import struct
+          p = Path('src/FCEUmm-Interface-Only-PS2.ELF')
+          b = p.read_bytes()[:20]
+          assert b[:4] == b'\x7fELF', 'Output is not an ELF file'
+          assert b[4:6] == bytes([1, 1]), 'Expected little-endian ELF32'
+          assert struct.unpack_from('<H', b, 18)[0] == 8, 'Expected MIPS machine type'
+          print('ELF header validated: ELF32 little-endian MIPS.')
+          PYCODE
+
+          cp src/FCEUmm-Interface-Only-PS2.ELF artifact-staging/
+          cp src/fceumm_interface.c artifact-staging/
+          cp src/fceumm_embedded_background.h artifact-staging/
+          cp src/Makefile artifact-staging/
+          cp assets/*.irx artifact-staging/
+          cp assets/background.png artifact-staging/
+          cp tools/embed_background.py artifact-staging/
+          cp README.md artifact-staging/
+          cp -R USB-STRUCTURE artifact-staging/
+          printf '%s\n' 'ELF built with no emulation core. Real PS2 USB/exFAT and menu testing is still required.' > artifact-staging/ELF-STATUS.txt
+
+      - name: Upload interface-only build and test files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FCEUmm-Interface-Edition-No-Core
+          path: artifact-staging/
+          if-no-files-found: error
+          retention-days: 14
