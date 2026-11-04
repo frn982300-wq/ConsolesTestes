@@ -1,0 +1,10 @@
+INSTRUCOES - FCEUmm Interface Edition (sem core)
+
+1. Extraia esta pasta ConsolesTestes para o computador.
+2. O conteudo interno ja esta organizado: .github/workflows, assets, src, tools, USB-STRUCTURE e LICENSES.
+3. Para atualizar o repositorio GitHub ConsolesTestes, envie o CONTEUDO desta pasta para a raiz do repositorio, mantendo todas as subpastas.
+4. Nao envie apenas este ZIP ao GitHub esperando que ele descompacte automaticamente.
+5. O workflow esta em .github/workflows/FCEUmm-Interface-Edition.yml.
+
+Estrutura do pendrive criada em USB-STRUCTURE/FCEUmm/: nes roms, images, cheats e STATES.
+Esta e uma versao interface-only; ainda precisa compilar com PS2SDK e ser testada no console.

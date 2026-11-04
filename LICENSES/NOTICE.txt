@@ -1,0 +1,8 @@
+FCEUmm Interface Edition - No Core
+
+This package contains an interface-only PlayStation 2 test frontend. It does not include,
+compile, link, or load Beetle PCE Fast, QuickNES, FCEUmm, or another emulation core.
+
+The GPL-2.0 text is retained as a license reference accompanying the inherited PCE Fast
+frontend materials. The included USB and audsrv IRX files are carried forward from the
+user-provided, previously tested PCE Fast package and are hash-verified by the workflow.
