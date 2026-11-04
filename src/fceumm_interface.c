@@ -280,7 +280,7 @@ static const unsigned long long glyphs[] = {
           }
           static int audio_init(unsigned requested_rate) {
             int r;
-            struct audsrv_fmt_t fmt;
+            int freq;
             if(audio_ready) return 0;
             if(!iop_prepared) {
               SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
@@ -297,15 +297,14 @@ static const unsigned long long glyphs[] = {
               if(r<0) { audio_error=r; return r; }
               audio_rpc_ready=1;
             }
-            fmt.freq=(int)(requested_rate ? requested_rate : 44100);
-            fmt.bits=16; fmt.channels=2;
-            r=audsrv_set_format(&fmt);
-            if(r<0 && fmt.freq!=44100) { fmt.freq=44100; r=audsrv_set_format(&fmt); }
-            if(r<0 && fmt.freq!=22050) { fmt.freq=22050; r=audsrv_set_format(&fmt); }
+            freq=(int)(requested_rate ? requested_rate : 44100);
+            r=audsrv_set_format(freq,16,2);
+            if(r<0 && freq!=44100) { freq=44100; r=audsrv_set_format(freq,16,2); }
+            if(r<0 && freq!=22050) { freq=22050; r=audsrv_set_format(freq,16,2); }
             if(r<0) { audio_error=r; return r; }
             r=audsrv_set_volume(90);
             if(r<0) { audio_error=r; return r; }
-            audio_rate=(unsigned)fmt.freq;
+            audio_rate=(unsigned)freq;
             audio_ready=1; audio_error=0;
             return 0;
           }
