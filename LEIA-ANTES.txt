@@ -1,7 +1,0 @@
-Copie a pasta FCEUmm para a raiz do pendrive.
-A estrutura obrigatoria e:
-FCEUmm/nes roms/
-FCEUmm/images/
-FCEUmm/cheats/
-FCEUmm/STATES/
-O ELF e gerado pelo GitHub Actions e pode ser colocado na raiz do pendrive.
