@@ -1,0 +1,57 @@
+name: Extract FCEUmm package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract-package:
+    name: Extract project files
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Locate and extract the audio-fixed ZIP package
+        shell: bash
+        run: |
+          ZIP_FILE="FCEUmm-Interface-Edition-AUDIO-FIX.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "::error::ZIP package not found: $ZIP_FILE"
+            echo "Upload the audio-fixed ZIP package to the repository root."
+            exit 1
+          fi
+
+          mkdir -p /tmp/fceumm-package
+          unzip -q "$ZIP_FILE" -d /tmp/fceumm-package
+
+          PACKAGE_DIR="/tmp/fceumm-package/ConsolesTestes"
+          if [ ! -d "$PACKAGE_DIR" ]; then
+            echo "::error::Expected folder 'ConsolesTestes' was not found inside the ZIP package."
+            exit 1
+          fi
+
+          # Keep the existing GitHub Actions workflows unchanged.
+          tar --exclude='./.github' -C "$PACKAGE_DIR" -cf - . | tar -C "$GITHUB_WORKSPACE" -xf -
+
+          echo "FCEUmm project files extracted."
+          echo "Existing .github/workflows files were left untouched."
+          find assets src tools USB-STRUCTURE LICENSES -maxdepth 3 -print | sort
+
+      - name: Commit extracted project files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No file changes need to be committed."
+          else
+            git commit -m "Fix FCEUmm interface audio API for PS2SDK"
+            git push
+          fi
