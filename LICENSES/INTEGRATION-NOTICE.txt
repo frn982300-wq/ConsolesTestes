@@ -1,0 +1,8 @@
+FCEUmm Interface Edition integration notice
+
+This package links the FCEUmm-PS2 0.3.3 core as its only emulation core.
+The upstream FCEUmm-PS2 source and its license notices are retained in src/core
+and LICENSES. The frontend/bridge integration is a separate adaptation.
+No game ROMs or BIOS files are included.
+
+The integrated ELF has not yet been built or tested on a PlayStation 2.

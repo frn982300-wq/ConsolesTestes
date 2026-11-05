@@ -1,5 +1,5 @@
 /* Generated from assets/background.png by tools/embed_background.py.
- * Source SHA-256: a1c43e0891ce322fcbb13f55a8707302a617124577bbf00acb2542639259279e
+ * Source SHA-256: 504ac31e8c241ccdde38e9b69ce415d58da4a44044cf74c2a38de0cc33b9c289
  * Resized to 640x480; PS2 GS-native A1B5G5R5 / PSMCT16, opaque alpha.
  * zlib-compressed and embedded in the ELF; no background file is needed on USB.
  */

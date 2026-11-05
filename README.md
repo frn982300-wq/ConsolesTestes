@@ -1,12 +1,22 @@
-# FCEUmm Interface Edition — No Core
+# FCEUmm Interface Edition — Core Integration Build
 
-Esta é uma **versão de testes da interface para PlayStation 2**. Ela reaproveita a estrutura visual e os sistemas de navegação, USB, capas, leitura de ROMs, Turbo, gerenciamento de CHT e slots de teste derivados do PCE Fast.
+This package combines the tested FCEUmm Interface Edition frontend with the
+community FCEUmm-PS2 0.3.3 emulator core. FCEUmm is the **only emulation core**.
 
-**Nenhum núcleo de emulação está incluído, compilado, vinculado ou carregado.** Não há emulação de NES nesta edição.
+## Important status
 
-## Estrutura exata do pendrive
+This is the first integration source package. The bridge and build configuration
+have been prepared and statically checked, but the full PS2DEV build and real
+console test are still required. Do not treat this package as a verified final
+ELF until the GitHub Actions build succeeds and the resulting ELF is tested on
+the PlayStation 2.
 
-Copie a pasta `FCEUmm` que está dentro de `USB-STRUCTURE` para a raiz do pendrive:
+The previous `FCEUmm-Interface-Only-PS2.ELF` is retained in `BACKUP/` as a
+known-good interface-only fallback. Do not overwrite or delete it.
+
+## USB structure — unchanged
+
+Copy the `FCEUmm` folder from `USB-STRUCTURE` to the root of the USB drive:
 
 ```text
 PENDRIVE/
@@ -17,62 +27,63 @@ PENDRIVE/
     └── STATES/
 ```
 
-A pasta `nes roms` deve ficar exatamente em letras minúsculas. Os outros nomes também são sensíveis ao caminho utilizado pelo programa.
+The `nes roms` directory name is lowercase exactly as shown. No extra folders
+are required on the USB drive.
 
-O ELF `FCEUmm-Interface-Only-PS2.ELF` pode ser colocado na raiz do pendrive ou em outro local de onde o usuário o inicie pelo uLaunchELF. O programa procura os dados em `mass:/FCEUmm/` e também tenta `mass0:/FCEUmm/`.
+## What is integrated in this source package
 
-## O que esta versão testa
+- The previously tested frontend, menu navigation and embedded NES/Famicom background.
+- The existing USB/exFAT module loading sequence and ROM browser.
+- The existing 200x200 PNG cover reader.
+- FCEUmm-PS2 0.3.3 core sources.
+- A bridge from the frontend to `FCEUI_Initialize`, `FCEUI_LoadGame`,
+  `FCEUI_Emulate`, `FCEUI_CloseGame`, save-state and cheat APIs.
+- GSKit rendering of the core's 256x240 indexed NES frame.
+- Mono audsrv output at 22050 Hz, matching the FCEUmm-PS2 0.3.3 release setting.
+- DualShock mapping: Cross=A, Square=B, Select, Start and D-pad.
+- Existing turbo buttons: Circle=Turbo A, Triangle=Turbo B.
+- Five real FCEUmm save-state slots under `FCEUmm/STATES`.
+- Frontend CHT parsing with Game Genie and 8-digit PAR code decoding. Unsupported
+  CHT code formats are not silently applied.
 
-- Inicialização gráfica GSKit e background personalizado 640×480 incorporado no ELF.
-- A imagem original fica em `assets/background.png` (1536×1152, proporção 4:3); o workflow a converte automaticamente para 640×480 no formato GS-native A1B5G5R5/PSMCT16.
-- O background é embutido no ELF durante a compilação; não precisa ficar no pendrive.
-- Inicialização do controle e navegação pelos menus.
-- Carregamento dos mesmos módulos USB/exFAT usados na versão PCE Fast de referência.
-- Navegação pela pasta `FCEUmm/nes roms/`.
-- Listagem de arquivos `.nes` e `.zip`.
-- Validação do cabeçalho iNES (`NES\x1A`) de ROMs `.nes`.
-- Extração em memória de um membro `.nes` em ZIP padrão, sem criptografia, sem ZIP64 e com compressão Stored ou Deflate. O arquivo ZIP deve ser de disco único e respeitar o limite de 8 MiB desta versão.
-- Carregamento de capas PNG 200×200 em `FCEUmm/images/`, usando o nome-base do jogo.
-- Leitura de arquivos `.cht` NES em `FCEUmm/cheats/`, quando o nome-base do CHT corresponde ao nome-base da ROM. O leitor reconhece as chaves comuns `cheats`, `cheatN_desc`, `cheatN_code` e `cheatN_enable` do formato Libretro/RetroArch.
-- Navegação no gerenciador de cheats e alternância visual ON/OFF.
-- Teste de gravação, leitura e CRC dos cinco slots de teste em `FCEUmm/STATES/`.
-- Inicialização do módulo audsrv para verificar a infraestrutura de áudio.
+## ROM formats shown by the browser
 
-## Limites intencionais da edição sem core
+The browser lists `.nes`, `.zip`, `.unf`, `.unif`, `.nsf` and `.nez` files.
+The FCEUmm core handles ZIP member selection. FDS `.fds` images are not listed
+in this first integration build because the agreed USB layout does not include
+the required `disksys.rom` BIOS file.
 
-| Recurso | O que realmente é testado |
-|---|---|
-| Cheats | Leitura do CHT, listagem e alternância visual. Os códigos **não são aplicados**. |
-| Save States | Escrita, leitura, diretório e CRC. Não são estados reais de emulação. |
-| ZIP | Leitura, extração e validação da ROM. O jogo não é executado. |
-| Áudio | Carregamento/inicialização do audsrv. Não há áudio de jogo. |
-| Turbo | Leitura dos botões e temporização visual. Não controla um jogo. |
-| Vídeo | Interface e background. Não há quadros de emulação NES. |
+## What remains to be verified
 
-Os arquivos de slot desta edição terminam em `.testslot1` até `.testslot5`, para não serem confundidos com futuros Save States reais do FCEUmm. Eles poderão ser apagados antes da integração do core.
+1. GitHub Actions compilation with the PS2DEV toolchain.
+2. Successful launch of the integrated ELF on the real PS2.
+3. Loading one `.nes` ROM from `mass:/FCEUmm/nes roms/`.
+4. Correct GSKit picture and audsrv sound.
+5. DualShock input and return-to-browser behavior.
+6. ZIP loading from the USB drive.
+7. Real Save State save/load.
+8. Game Genie/PAR cheat application.
 
-## Drivers preservados
+The interface-only ELF remains the fallback if any integration test fails.
 
-O pacote inclui os arquivos IRX usados como referência no PCE Fast:
+## Build
 
-- `usbd.irx`
-- `usbhdfsd.irx`
-- `audsrv.irx`
+The workflow is provided separately as `FCEUmm-Core-Integration.yml`.
+Create it in the GitHub repository at:
 
-O workflow verifica os SHA-256 desses três arquivos antes de compilar. Isso confirma que os mesmos binários de driver foram empacotados; a leitura exFAT e a estabilidade ainda precisam ser testadas novamente com este ELF no PS2 real.
+```text
+.github/workflows/FCEUmm-Core-Integration.yml
+```
 
-## Como gerar o ELF pelo GitHub Actions
+Then run **FCEUmm Core Integration Build** from GitHub Actions. The workflow
+builds inside the official PS2DEV container and uploads
+`FCEUmm-NES-PS2.ELF` when compilation succeeds.
 
-1. Extraia todo o conteúdo deste pacote na raiz de um repositório GitHub.
-2. Mantenha a branch principal com o nome `main`.
-3. Envie os arquivos para o repositório. O workflow também pode ser iniciado manualmente em **Actions → FCEUmm Interface Edition - No Core → Run workflow**.
-4. Aguarde a compilação terminar.
-5. Baixe o artefato `FCEUmm-Interface-Edition-No-Core`.
-6. Copie o ELF e a pasta `FCEUmm` para o pendrive.
-7. Inicie o ELF no PS2 e teste os menus e os arquivos do pendrive.
+## Source and license
 
-O workflow compila somente o frontend. Ele não baixa nem compila QuickNES, Beetle PCE Fast, FCEUmm ou qualquer outro core.
+The FCEUmm-PS2 0.3.3 source is included under `src/core/`. Its upstream
+`Copying`, `Authors`, README, patch and changelog are retained under
+`LICENSES/`. The FCEUmm core is GPL-2.0-or-later; preserve its copyright and
+license notices in redistributed source builds.
 
-## Próxima fase
-
-Depois de aprovar a interface, USB, capas, CHT, controles e operações de teste dos slots no PS2, será preparada uma integração separada com o núcleo FCEUmm. Os slots `.testslot` não serão reaproveitados como estados reais.
+No commercial ROMs or game BIOS files are bundled.

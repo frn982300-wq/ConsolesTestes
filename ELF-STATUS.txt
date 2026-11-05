@@ -1,0 +1,6 @@
+FCEUmm Core Integration status
+
+The source bridge and build configuration are prepared.
+The integrated PS2 ELF has NOT yet been compiled or tested on hardware.
+The interface-only fallback ELF is preserved in BACKUP/.
+Do not rename the fallback ELF as the integrated emulator.
