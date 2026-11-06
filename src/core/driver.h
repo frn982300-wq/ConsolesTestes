@@ -49,8 +49,11 @@ void FCEUI_NetplayText(uint8 *text);
    should call FCEUI_NetplayStop() after it has deinitialized the network on the driver
    side.
 */
-void FCEUD_NetworkClose(void);
 #endif
+
+/* The PS2 driver provides a no-network stub as well.  CloseGame() references it
+   even when NETWORK is disabled, so its prototype must remain visible in all builds. */
+void FCEUD_NetworkClose(void);
 
 int FCEUI_BeginWaveRecord(char *fn);
 int FCEUI_EndWaveRecord(void);
@@ -247,4 +250,3 @@ int FCEUI_DatachSet(const uint8 *rcode);
 #ifdef  __cplusplus
 }
 #endif
-
