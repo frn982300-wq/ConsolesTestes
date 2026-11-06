@@ -1,0 +1,90 @@
+name: FCEUmm Core Integration Build (fixed)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build integrated NES/Famicom ELF
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check required project files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f src/Makefile || { echo "ERROR: src/Makefile not found"; exit 1; }
+          test -d src/core || { echo "ERROR: src/core directory not found"; exit 1; }
+          test -d src/ps2bridge || { echo "ERROR: src/ps2bridge directory not found"; exit 1; }
+          echo "Project structure OK."
+
+      - name: Pull official PS2DEV build container
+        run: docker pull ghcr.io/ps2dev/ps2dev:latest
+
+      - name: Install make and build FCEUmm core and frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            -e PS2DEV=/usr/local/ps2dev \
+            -e PS2SDK=/usr/local/ps2dev/ps2sdk \
+            -e GSKIT=/usr/local/ps2dev/gsKit \
+            ghcr.io/ps2dev/ps2dev:latest \
+            sh -lc '
+              set -eu
+
+              # The official runtime image is intentionally minimal and does not
+              # include GNU make. Install it inside the container that runs the build.
+              apk add --no-cache make
+
+              export PATH="$PS2DEV/bin:$PS2DEV/ee/bin:$PS2DEV/iop/bin:$PS2DEV/dvp/bin:$PS2SDK/bin:$PATH"
+
+              echo "Checking build tools..."
+              command -v make
+              command -v mips64r5900el-ps2-elf-gcc
+
+              echo "Starting FCEUmm PS2 build..."
+              make -C src clean all
+            ' 2>&1 | tee build-core.log
+
+      - name: Verify generated PS2 ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELF="src/FCEUmm-NES-PS2.ELF"
+
+          if [ ! -s "$ELF" ]; then
+            echo "ERROR: build did not produce a non-empty ELF: $ELF"
+            exit 1
+          fi
+
+          file "$ELF"
+          readelf -h "$ELF" | tee elf-header.txt
+          grep -qi "MIPS" elf-header.txt || {
+            echo "ERROR: generated ELF does not identify a MIPS target."
+            exit 1
+          }
+
+          echo "ELF verification passed."
+
+      - name: Upload verified ELF and build logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: FCEUmm-NES-PS2-Core-Integration
+          path: |
+            src/FCEUmm-NES-PS2.ELF
+            build-core.log
+            elf-header.txt
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 14
