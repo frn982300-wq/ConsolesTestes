@@ -269,6 +269,7 @@ static const unsigned long long glyphs[] = {
           static int audio_init(unsigned requested_rate) {
             int r;
             int freq;
+            struct audsrv_fmt_t format = { 0 };
             if(audio_ready) return 0;
             if(!iop_prepared) {
               SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
@@ -285,10 +286,26 @@ static const unsigned long long glyphs[] = {
               if(r<0) { audio_error=r; return r; }
               audio_rpc_ready=1;
             }
+            /*
+             * Current PS2SDK audsrv API accepts a pointer to audsrv_fmt_t.
+             * This core outputs mono 16-bit samples, so keep channels at 1.
+             */
             freq=(int)(requested_rate ? requested_rate : 22050);
-            r=audsrv_set_format(freq,16,1);
-            if(r<0 && freq!=44100) { freq=44100; r=audsrv_set_format(freq,16,1); }
-            if(r<0 && freq!=11025) { freq=11025; r=audsrv_set_format(freq,16,1); }
+            format.freq=freq;
+            format.bits=16;
+            format.channels=1;
+            r=audsrv_set_format(&format);
+
+            if(r<0 && freq!=44100) {
+              freq=44100;
+              format.freq=freq;
+              r=audsrv_set_format(&format);
+            }
+            if(r<0 && freq!=11025) {
+              freq=11025;
+              format.freq=freq;
+              r=audsrv_set_format(&format);
+            }
             if(r<0) { audio_error=r; return r; }
             r=audsrv_set_volume(90);
             if(r<0) { audio_error=r; return r; }
