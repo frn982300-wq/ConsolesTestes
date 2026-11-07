@@ -38,11 +38,6 @@ void FCEUI_NetplayStop(void);
 /* Return 0 on failure, 1 on success. */
 int FCEUD_RecvData(void *data, uint32 len);
 
-/* The PS2 driver provides this function as a stub even when NETWORK is
-   disabled.  netplay.c references it from FCEUI_NetplayText(), so its
-   declaration must be visible in non-network builds as well. */
-int FCEUD_SendData(void *data, uint32 len);
-
 /* Display text received over the network. */
 void FCEUD_NetplayText(uint8 *text);
 
@@ -54,6 +49,10 @@ void FCEUI_NetplayText(uint8 *text);
    side.
 */
 #endif
+
+/* The PS2 driver supplies a stub even when NETWORK is disabled.
+   netplay.c still references this function in non-network builds. */
+int FCEUD_SendData(void *data, uint32 len);
 
 /* The PS2 driver provides a no-network stub as well.  CloseGame() references it
    even when NETWORK is disabled, so its prototype must remain visible in all builds. */
