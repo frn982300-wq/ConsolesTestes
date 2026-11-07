@@ -225,6 +225,12 @@ int fceumm_core_is_loaded(void)
 }
 
 int fceumm_core_run_frame(u32 nes_buttons)
+{
+    uint8_t *frame = NULL;
+    int32 *sound = NULL;
+    int32 sample_count = 0;
+    int i;
+    int samples_to_play;
     uint8_t *frame = NULL;
     int32 *sound = NULL;
     int32 sample_count = 0;
