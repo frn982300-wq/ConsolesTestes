@@ -28,7 +28,7 @@ EE_OBJS = fceumm_interface.o $(FCEU_CORE_OBJS) usbd.o usbhdfsd.o iomanx.o filexi
 
 EE_CFLAGS += -O3 -G0 -Wall -ffast-math -funroll-loops -fomit-frame-pointer
 EE_CFLAGS += -fstrict-aliasing -funsigned-char -fno-builtin-printf -DNDEBUG
-EE_CFLAGS += -D_EE -D__PS2__ -DHAVE_ASPRINTF
+EE_CFLAGS += -D_EE -D__PS2__
 EE_CFLAGS += -DPATH_MAX=1024 -DINLINE=inline -DPSS_STYLE=1 -DFCEU_VERSION_NUMERIC=9813
 EE_CFLAGS += -DLSB_FIRST -DLOCAL_LE=1
 EE_CFLAGS += -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__
