@@ -27,11 +27,11 @@
 
 static GSGLOBAL *core_gs;
 static GSTEXTURE nes_texture;
-static uint32_t *nes_clut;
+static u32 *nes_clut;
 static int core_initialized;
 static int core_game_loaded;
 static int core_texture_ready;
-static uint32_t core_input_word;
+static uint32 core_input_word;
 static unsigned int core_cheat_count;
 static int16_t core_audio_buffer[FCEUMM_AUDIO_MAX_SAMPLES];
 
@@ -129,7 +129,7 @@ static int core_setup_video(void)
     nes_texture.TBW = 4;
     nes_texture.Filter = GS_FILTER_NEAREST;
 
-    nes_clut = (uint32_t *)memalign(128, gsKit_texture_size_ee(16, 16, GS_PSM_CT32));
+    nes_clut = (u32 *)memalign(128, gsKit_texture_size_ee(16, 16, GS_PSM_CT32));
     if (!nes_clut) { core_debug_last_error = -1; core_debug_write("VIDEO_CLUT_ALLOC_FAIL", -1, NULL); return -1; }
     core_debug_write("VIDEO_CLUT_ALLOC_OK", 0, NULL);
 
@@ -165,16 +165,16 @@ static void core_update_palette(void)
 
     for (i = 0; i < 256; ++i) {
         FCEUD_GetPalette((uint8)i, &r, &g, &b);
-        nes_clut[i] = ((uint32_t)b << 16) |
-                      ((uint32_t)g << 8) |
-                      (uint32_t)r;
+        nes_clut[i] = ((uint32)b << 16) |
+                      ((uint32)g << 8) |
+                      (uint32)r;
     }
 
     /* Match the CLUT ordering used by the tested FCEUmm-PS2 renderer. */
     for (i = 0; i < 256; ++i) {
         int modi = i & 63;
         if ((modi >= 8 && modi < 16) || (modi >= 40 && modi < 48)) {
-            uint32_t tmp = nes_clut[i];
+            u32 tmp = nes_clut[i];
             nes_clut[i] = nes_clut[i + 8];
             nes_clut[i + 8] = tmp;
         }
@@ -310,11 +310,11 @@ int fceumm_core_is_loaded(void)
     return core_game_loaded;
 }
 
-int fceumm_core_run_frame(uint32_t nes_buttons)
+int fceumm_core_run_frame(uint32 nes_buttons)
 {
     uint8_t *frame = NULL;
-    int32_t *sound = NULL;
-    int32_t sample_count = 0;
+    int32 *sound = NULL;
+    int32 sample_count = 0;
     int i;
     int samples_to_play;
 
@@ -344,7 +344,7 @@ int fceumm_core_run_frame(uint32_t nes_buttons)
     }
 
     core_debug_stage = 12;
-    nes_texture.Mem = (uint32_t *)frame;
+    nes_texture.Mem = (u32 *)frame;
     core_debug_write("FRAME_TEXTURE_UPLOAD_ENTER", 0, NULL);
     gsKit_texture_upload(core_gs, &nes_texture);
     core_debug_write("FRAME_TEXTURE_UPLOAD_DONE", 0, NULL);
@@ -365,7 +365,7 @@ int fceumm_core_run_frame(uint32_t nes_buttons)
             samples_to_play = FCEUMM_AUDIO_MAX_SAMPLES;
 
         for (i = 0; i < samples_to_play; ++i) {
-            int32_t sample = sound[i];
+            int32 sample = sound[i];
             if (sample > 32767) sample = 32767;
             if (sample < -32768) sample = -32768;
             core_audio_buffer[i] = (int16_t)sample;
