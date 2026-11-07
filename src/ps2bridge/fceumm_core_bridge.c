@@ -224,8 +224,7 @@ int fceumm_core_is_loaded(void)
     return core_game_loaded;
 }
 
-int fceumm_core_run_frame(uint32_t nes_buttons)
-{
+int fceumm_core_run_frame(u32 nes_buttons)
     uint8_t *frame = NULL;
     int32 *sound = NULL;
     int32 sample_count = 0;
