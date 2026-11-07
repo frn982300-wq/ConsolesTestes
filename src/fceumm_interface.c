@@ -1094,7 +1094,7 @@ static int begin_game(const char *path) {
   return 0;
 }
 static void draw_game(void) {
-  uint32_t nes_buttons=0;
+  u32 nes_buttons=0;
   int r;
 
   /* DualShock -> standard NES controller bit order used by FCEUmm pads.c. */
@@ -1117,7 +1117,7 @@ static void draw_game(void) {
     int stage=0, err=0, samples=0, audio_result=0;
     char dbg[96];
     fceumm_core_debug_snapshot(&attempts,&completed,&stage,&err,&samples,&audio_result);
-    snprintf(dbg,sizeof(dbg),"DBG A%u C%u S%d E%d",attempts,completed,stage,err);
+    snprintf(dbg,sizeof(dbg),"DBG A%u C%u S%d E%d N%d AU%d",attempts,completed,stage,err,samples,audio_result);
     label(8,420,1,dbg,GS_SETREG_RGBAQ(50,210,175,0x80,0));
   }
   if(r<0) {
@@ -1264,13 +1264,19 @@ static void draw_game(void) {
           #endif
                 /* Run one real FCEUmm emulation frame. */
                 turbo_updated_this_frame=0;
+                fceumm_core_debug_event("FRONTEND_INPUT_POLL_ENTER", 0);
                 input_poll();
+                fceumm_core_debug_event("FRONTEND_INPUT_POLL_DONE", 0);
+                fceumm_core_debug_event("FRONTEND_DRAW_GAME_ENTER", 0);
                 draw_game();
+                fceumm_core_debug_event("FRONTEND_DRAW_GAME_DONE", 0);
                 if(state_message_frames>0 && state_message[0]) {
                   label(12,430,1,state_message,GS_SETREG_RGBAQ(50,210,175,0x80,0));
                   state_message_frames--;
                 }
+                fceumm_core_debug_event("FRONTEND_REFRESH_GAME_ENTER", 0);
                 refresh_game_screen();
+                fceumm_core_debug_event("FRONTEND_REFRESH_GAME_DONE", 0);
               }
             }
             return 0;
