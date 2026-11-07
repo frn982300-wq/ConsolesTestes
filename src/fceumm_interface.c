@@ -43,8 +43,8 @@ static int fceu_ascii_isalnum(int c) { return (c >= '0' && c <= '9') || (c >= 'A
                               /* Diagnostic overlays are disabled in this release test. */
           #define FCEU_SHOW_DIAGNOSTICS 0
 
-          extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[], audsrv_irx[];
-          extern unsigned int size_usbd_irx, size_usbhdfsd_irx, size_iomanx_irx, size_filexio_irx, size_audsrv_irx;
+          extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[], freesd_irx[], audsrv_irx[];
+          extern unsigned int size_usbd_irx, size_usbhdfsd_irx, size_iomanx_irx, size_filexio_irx, size_freesd_irx, size_audsrv_irx;
 
           typedef struct { char name[256]; int dir; } Entry;
           static Entry entries[MAX_FILES];
@@ -100,7 +100,7 @@ static char cover_debug[96] = "NO COVER CHECK";
           static unsigned int input_a_queries, input_b_queries;
           static int input_a_value, input_b_value;
           #endif
-          static int audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
+          static int freesd_module_loaded, audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
           static unsigned audio_rate = 22050;
 
           #define FCEU_STATE_SLOTS 5
@@ -289,15 +289,29 @@ static const unsigned long long glyphs[] = {
             if(!iop_prepared) {
               SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
             }
+            /*
+             * Match the known-working FCEUmm-PS2 0.3.3 startup sequence:
+             * load FreeSD first, then audsrv, then initialize audsrv RPC.
+             * The original PS2 driver embeds both IRX modules from PS2SDK.
+             */
+            if(!freesd_module_loaded) {
+              fceumm_core_debug_event("AUDIO_FREESD_LOAD_ENTER", 0);
+              r=load_mod(freesd_irx,size_freesd_irx);
+              fceumm_core_debug_event("AUDIO_FREESD_LOAD_DONE", r);
+              if(r<0) { audio_error=r; return r; }
+              freesd_module_loaded=1;
+            }
             if(!audio_module_loaded) {
-              /* LIBSD is the PS2 IOP sound driver required by audsrv. */
-              (void)SifLoadModule("rom0:LIBSD",0,NULL);
+              fceumm_core_debug_event("AUDIO_AUDSRV_LOAD_ENTER", 0);
               r=load_mod(audsrv_irx,size_audsrv_irx);
+              fceumm_core_debug_event("AUDIO_AUDSRV_LOAD_DONE", r);
               if(r<0) { audio_error=r; return r; }
               audio_module_loaded=1;
             }
             if(!audio_rpc_ready) {
+              fceumm_core_debug_event("AUDIO_AUDSRV_INIT_ENTER", 0);
               r=audsrv_init();
+              fceumm_core_debug_event("AUDIO_AUDSRV_INIT_DONE", r);
               if(r<0) { audio_error=r; return r; }
               audio_rpc_ready=1;
             }
@@ -309,7 +323,9 @@ static const unsigned long long glyphs[] = {
             format.freq=freq;
             format.bits=16;
             format.channels=1;
+            fceumm_core_debug_event("AUDIO_SET_FORMAT_ENTER", freq);
             r=audsrv_set_format(&format);
+            fceumm_core_debug_event("AUDIO_SET_FORMAT_DONE", r);
 
             if(r<0 && freq!=44100) {
               freq=44100;
@@ -322,7 +338,9 @@ static const unsigned long long glyphs[] = {
               r=audsrv_set_format(&format);
             }
             if(r<0) { audio_error=r; return r; }
+            fceumm_core_debug_event("AUDIO_SET_VOLUME_ENTER", 90);
             r=audsrv_set_volume(90);
+            fceumm_core_debug_event("AUDIO_SET_VOLUME_DONE", r);
             if(r<0) { audio_error=r; return r; }
             audio_rate=(unsigned)freq;
             audio_ready=1; audio_error=0;
