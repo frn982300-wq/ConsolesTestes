@@ -36,8 +36,12 @@ void FCEUI_NetplayStop(void);
 */
 
 /* Return 0 on failure, 1 on success. */
-int FCEUD_SendData(void *data, uint32 len);
 int FCEUD_RecvData(void *data, uint32 len);
+
+/* The PS2 driver provides this function as a stub even when NETWORK is
+   disabled.  netplay.c references it from FCEUI_NetplayText(), so its
+   declaration must be visible in non-network builds as well. */
+int FCEUD_SendData(void *data, uint32 len);
 
 /* Display text received over the network. */
 void FCEUD_NetplayText(uint8 *text);
