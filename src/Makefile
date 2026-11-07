@@ -24,11 +24,11 @@ CORE_SOURCE_DIRS = $(BRIDGE_DIR) $(CORE_DIR) $(CORE_DIR)/boards $(CORE_DIR)/inpu
 FCEU_CORE_SRCS = $(foreach dir,$(CORE_SOURCE_DIRS),$(wildcard $(dir)/*.c))
 FCEU_CORE_OBJS = $(FCEU_CORE_SRCS:.c=.o)
 
-EE_OBJS = fceumm_interface.o $(FCEU_CORE_OBJS) usbd.o usbhdfsd.o iomanx.o filexio.o audsrv.o
+EE_OBJS = fceumm_interface.o $(FCEU_CORE_OBJS) usbd.o usbhdfsd.o iomanx.o filexio.o freesd.o audsrv.o
 
 EE_CFLAGS += -O1 -G0 -g -Wall -fno-omit-frame-pointer
 EE_CFLAGS += -funsigned-char -fno-builtin-printf -DFCEUMM_DEBUG_TRACE=1
-EE_CFLAGS += -D_EE -D__PS2__
+EE_CFLAGS += -D_EE -D__PS2__ -DHAVE_ASPRINTF
 EE_CFLAGS += -DPATH_MAX=1024 -DINLINE=inline -DPSS_STYLE=1 -DFCEU_VERSION_NUMERIC=9813
 EE_CFLAGS += -DLSB_FIRST -DLOCAL_LE=1
 EE_CFLAGS += -DNEWLIB_PORT_AWARE -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D__SYS_TIME_H__
@@ -55,6 +55,9 @@ usbd.c: ../assets/usbd.irx
 usbhdfsd.c: ../assets/usbhdfsd.irx
 	bin2c $< $@ usbhdfsd_irx
 
+freesd.c: $(PS2SDK)/iop/irx/freesd.irx
+	bin2c $< $@ freesd_irx
+
 audsrv.c: ../assets/audsrv.irx
 	bin2c $< $@ audsrv_irx
 
@@ -66,12 +69,13 @@ filexio.c: $(PS2SDK)/iop/irx/fileXio.irx
 
 usbd.o: usbd.c
 usbhdfsd.o: usbhdfsd.c
+freesd.o: freesd.c
 audsrv.o: audsrv.c
 iomanx.o: iomanx.c
 filexio.o: filexio.c
 
 clean:
-	rm -f $(EE_OBJS) $(EE_BIN) usbd.c usbhdfsd.c iomanx.c filexio.c audsrv.c
+	rm -f $(EE_OBJS) $(EE_BIN) usbd.c usbhdfsd.c iomanx.c filexio.c freesd.c audsrv.c
 
 .PHONY: all clean
 
