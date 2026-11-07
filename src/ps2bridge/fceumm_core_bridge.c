@@ -31,7 +31,7 @@ static u32 *nes_clut;
 static int core_initialized;
 static int core_game_loaded;
 static int core_texture_ready;
-static uint32 core_input_word;
+static u32 core_input_word;
 static unsigned int core_cheat_count;
 static int16_t core_audio_buffer[FCEUMM_AUDIO_MAX_SAMPLES];
 
@@ -68,17 +68,41 @@ static void core_debug_open(void)
     }
 }
 
+static void core_debug_update_stage(const char *event)
+{
+    if (!event) return;
+    if (!strcmp(event, "GS_SYNC_ENTER")) core_debug_stage = 30;
+    else if (!strcmp(event, "GS_SYNC_DONE")) core_debug_stage = 31;
+    else if (!strcmp(event, "GS_QUEUE_ENTER")) core_debug_stage = 32;
+    else if (!strcmp(event, "GS_QUEUE_DONE")) core_debug_stage = 33;
+    else if (!strcmp(event, "GS_AUDIO_FLUSH_ENTER")) core_debug_stage = 34;
+    else if (!strcmp(event, "GS_AUDIO_FLUSH_DONE")) core_debug_stage = 35;
+    else if (!strcmp(event, "FRAME_AUDIO_PLAY_ENTER")) core_debug_stage = 40;
+    else if (!strcmp(event, "FRAME_AUDIO_PLAY_DONE")) core_debug_stage = 41;
+    else if (!strcmp(event, "FRAME_AUDIO_BUFFER_READY")) core_debug_stage = 15;
+    else if (!strcmp(event, "FRAME_NO_AUDIO")) core_debug_stage = 16;
+    else if (!strcmp(event, "FRONTEND_INPUT_POLL_ENTER")) core_debug_stage = 50;
+    else if (!strcmp(event, "FRONTEND_INPUT_POLL_DONE")) core_debug_stage = 51;
+    else if (!strcmp(event, "FRONTEND_DRAW_GAME_ENTER")) core_debug_stage = 52;
+    else if (!strcmp(event, "FRONTEND_DRAW_GAME_DONE")) core_debug_stage = 53;
+    else if (!strcmp(event, "FRONTEND_REFRESH_GAME_ENTER")) core_debug_stage = 54;
+    else if (!strcmp(event, "FRONTEND_REFRESH_GAME_DONE")) core_debug_stage = 55;
+}
+
 static void core_debug_write(const char *event, int value, const char *detail)
 {
     unsigned int f = core_frame_attempts;
     int throttled = 0;
 
+    /* Update the on-screen stage even when disk logging is throttled. */
+    core_debug_update_stage(event);
+
     if (event && !strcmp(event, "FRAME_HEARTBEAT")) {
-        if (f > 10 && (f % 30u) != 0)
+        if (f > 30 && (f % 30u) != 0)
             throttled = 1;
     } else if (event && (!strncmp(event, "FRAME_", 6) || !strncmp(event, "GS_", 3))) {
-        /* Capture every stage of the first 10 frames, then one sample/second. */
-        if (f > 10 && (f % 60u) != 0)
+        /* Capture all events through frame 30 so a C18 freeze is fully recorded. */
+        if (f > 30 && (f % 60u) != 0)
             throttled = 1;
     }
     if (throttled)
@@ -165,9 +189,9 @@ static void core_update_palette(void)
 
     for (i = 0; i < 256; ++i) {
         FCEUD_GetPalette((uint8)i, &r, &g, &b);
-        nes_clut[i] = ((uint32)b << 16) |
-                      ((uint32)g << 8) |
-                      (uint32)r;
+        nes_clut[i] = ((u32)b << 16) |
+                      ((u32)g << 8) |
+                      (u32)r;
     }
 
     /* Match the CLUT ordering used by the tested FCEUmm-PS2 renderer. */
@@ -310,7 +334,7 @@ int fceumm_core_is_loaded(void)
     return core_game_loaded;
 }
 
-int fceumm_core_run_frame(uint32 nes_buttons)
+int fceumm_core_run_frame(u32 nes_buttons)
 {
     uint8_t *frame = NULL;
     int32 *sound = NULL;
