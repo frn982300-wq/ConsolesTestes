@@ -9,7 +9,7 @@ int fceumm_core_load_game(const char *path);
 int fceumm_core_set_audio_rate(unsigned rate);
 void fceumm_core_close_game(void);
 int fceumm_core_is_loaded(void);
-int fceumm_core_run_frame(uint32_t nes_buttons);
+int fceumm_core_run_frame(unsigned int nes_buttons);
 int fceumm_core_audio_flush(void);
 int fceumm_core_save_state(int slot);
 int fceumm_core_load_state(int slot);
