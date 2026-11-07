@@ -1,9 +1,9 @@
           /*
-           * FCEUmm PS2 - interface-only test edition.
-           * Reuses the tested PCE Fast frontend shell; no emulation core is linked.
-           * No emulation core is compiled, linked, or loaded in this edition.
+           * FCEUmm PS2 - integrated NES/Famicom frontend.
+           * Reuses the tested PCE Fast frontend shell; FCEUmm-PS2 0.3.3 is the only core.
+           * The FCEUmm-PS2 0.3.3 core is linked as the only emulation core.
            * No ROM or firmware bundled. Uses the previously tested V10/V11 exFAT driver pair.
-           * audsrv is initialized for a driver check; no emulation audio is generated.
+           * audsrv is initialized for the FCEUmm mono audio stream at 22050 Hz.
            */
           /* POSIX types are supplied through the explicit PS2 toolchain newlib header in EE_CFLAGS. */
           #include <gsKit.h>
@@ -33,14 +33,14 @@ static int fceu_ascii_isalnum(int c) { return (c >= '0' && c <= '9') || (c >= 'A
           #include <stdint.h>
           #include <zlib.h>
 #include "fceumm_embedded_background.h"
+#include "fceumm_core_bridge.h"
           /* Some PS2SDK/newlib headers do not expose snprintf under the current
              feature macros. Declare its standard signature explicitly. */
           extern int snprintf(char *str, size_t size, const char *format, ...);
 
           #define MAX_FILES 128
           #define MAX_PATH 512
-          #define ROM_LIMIT (8u * 1024u * 1024u)
-                    /* Diagnostic overlays are disabled in this release test. */
+                              /* Diagnostic overlays are disabled in this release test. */
           #define FCEU_SHOW_DIAGNOSTICS 0
 
           extern unsigned char usbd_irx[], usbhdfsd_irx[], iomanx_irx[], filexio_irx[], audsrv_irx[];
@@ -52,11 +52,9 @@ static int fceu_ascii_isalnum(int c) { return (c >= '0' && c <= '9') || (c >= 'A
           static char folder[MAX_PATH] = "mass:/";
           static char game_path[MAX_PATH];
           static char game_member_path[MAX_PATH]; /* NES member name inside a ZIP, or direct ROM path. */
-          /* ROM validation details shown in the interface-only test screen. */
+          /* ROM file-size details shown if the core rejects a selected game. */
           static unsigned long last_rom_size;
-                              static unsigned char *game_data;
-          static size_t game_size;
-          static char pad_buf[256] __attribute__((aligned(64)));
+                                                  static char pad_buf[256] __attribute__((aligned(64)));
           static struct padButtonStatus pad_info;
           static unsigned int buttons_now, buttons_prev, buttons_edge;
           /* Hold-to-fire turbo: about 15 pulses/second at the FCEUmm ~60 Hz frame rate. */
@@ -103,25 +101,14 @@ static char cover_debug[96] = "NO COVER CHECK";
           static int input_a_value, input_b_value;
           #endif
           static int audio_module_loaded, audio_rpc_ready, audio_ready, audio_error;
-          static unsigned audio_rate = 44100;
+          static unsigned audio_rate = 22050;
 
-          /* Interface-test slots verify USB read/write and CRC only; no emulation state exists yet. */
           #define FCEU_STATE_SLOTS 5
-          #define FCEU_STATE_VERSION 1u
-          typedef struct {
-            char magic[8];
-            uint32_t version;
-            uint32_t game_hash;
-            uint32_t payload_size;
-            uint32_t payload_hash;
-            uint32_t turbo_i_counter;
-            uint32_t turbo_ii_counter;
-          } FCEUmmTestStateHeader;
-          static int state_menu_selected = 0;
+static int state_menu_selected = 0;
           static char state_message[64] = "";
           static int state_message_frames;
 
-          /* External NES .cht files are parsed for interface testing only. No code is applied without FCEUmm. */
+          /* External NES .cht files are parsed by the frontend and applied through FCEUmm. */
           #define FCEU_CHEAT_MAX 64
           #define FCEU_CHEAT_DESC 72
           #define FCEU_CHEAT_CODE 160
@@ -137,6 +124,7 @@ static char cover_debug[96] = "NO COVER CHECK";
           static int cheat_menu_selected = 0;
           static char active_cht_path[MAX_PATH] = "";
           static void state_set_message(const char *message);
+static void apply_enabled_cheats(void);
 
           static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-/:._()[]";
 static const unsigned long long glyphs[] = {
@@ -281,8 +269,6 @@ static const unsigned long long glyphs[] = {
           static int audio_init(unsigned requested_rate) {
             int r;
             int freq;
-            struct audsrv_fmt_t format;
-
             if(audio_ready) return 0;
             if(!iop_prepared) {
               SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
@@ -299,36 +285,18 @@ static const unsigned long long glyphs[] = {
               if(r<0) { audio_error=r; return r; }
               audio_rpc_ready=1;
             }
-
-            /*
-             * Current PS2SDK audsrv API takes a pointer to audsrv_fmt_t.
-             * Keep the existing requested-rate fallback order.
-             */
-            freq=(int)(requested_rate ? requested_rate : 44100);
-            format.freq=freq;
-            format.bits=16;
-            format.channels=2;
-            r=audsrv_set_format(&format);
-
-            if(r<0 && freq!=44100) {
-              freq=44100;
-              format.freq=freq;
-              r=audsrv_set_format(&format);
-            }
-            if(r<0 && freq!=22050) {
-              freq=22050;
-              format.freq=freq;
-              r=audsrv_set_format(&format);
-            }
+            freq=(int)(requested_rate ? requested_rate : 22050);
+            r=audsrv_set_format(freq,16,1);
+            if(r<0 && freq!=44100) { freq=44100; r=audsrv_set_format(freq,16,1); }
+            if(r<0 && freq!=11025) { freq=11025; r=audsrv_set_format(freq,16,1); }
             if(r<0) { audio_error=r; return r; }
-
             r=audsrv_set_volume(90);
             if(r<0) { audio_error=r; return r; }
             audio_rate=(unsigned)freq;
             audio_ready=1; audio_error=0;
             return 0;
           }
-          /* No video-frame conversion is needed before the core is integrated. */
+          /* FCEUmm supplies indexed 256x240 frames to the GSKit bridge. */
           static int has_extension_ci(const char *name, const char *extension) {
             const char *dot;
             size_t n;
@@ -345,6 +313,14 @@ static const unsigned long long glyphs[] = {
           }
           static int is_nes(const char *name) { return has_extension_ci(name,".nes"); }
           static int is_zip(const char *name) { return has_extension_ci(name,".zip"); }
+          static int is_unf(const char *name) { return has_extension_ci(name,".unf"); }
+          static int is_unif(const char *name) { return has_extension_ci(name,".unif"); }
+          static int is_nsf(const char *name) { return has_extension_ci(name,".nsf"); }
+          static int is_nez(const char *name) { return has_extension_ci(name,".nez"); }
+          static int is_supported_rom(const char *name) {
+            return is_nes(name) || is_zip(name) || is_unf(name) ||
+                   is_unif(name) || is_nsf(name) || is_nez(name);
+          }
           /* No temporary ROMs are created in Interface Edition. */
           static int cmp_entry(const void *pa,const void *pb) {
             const Entry *a=(const Entry *)pa,*b=(const Entry *)pb;
@@ -372,7 +348,7 @@ static const unsigned long long glyphs[] = {
               if(!strcmp(dirent_buf.name,".")||!strcmp(dirent_buf.name,".."))continue;
               /* Only list .nes and .zip files in FCEUmm/nes roms/. */
               if(FIO_S_ISDIR(dirent_buf.stat.mode)) continue;
-              if(!is_nes(dirent_buf.name) && !is_zip(dirent_buf.name)) continue;
+              if(!is_supported_rom(dirent_buf.name)) continue;
               if(nentries>=MAX_FILES)continue;
               strncpy(entries[nentries].name,dirent_buf.name,sizeof(entries[0].name)-1);
               entries[nentries].name[sizeof(entries[0].name)-1]=0;
@@ -666,7 +642,7 @@ static int load_selected_cover(void) {
   const char *name,*slash,*dot,*root;
   size_t n;
   if(nentries<=0 || selected<0 || selected>=nentries || entries[selected].dir) return 0;
-  if(!is_nes(entries[selected].name) && !is_zip(entries[selected].name)) return 0;
+  if(!is_supported_rom(entries[selected].name)) return 0;
   name=entries[selected].name;
   slash=strrchr(name,'/');
   if(slash) name=slash+1;
@@ -714,7 +690,7 @@ static void display_entry_title(int index,char *out,size_t cap) {
   if(index<0 || index>=nentries) return;
   strncpy(out,entries[index].name,cap-1);
   out[cap-1]='\0';
-  if(!entries[index].dir && (is_nes(out) || is_zip(out))) {
+  if(!entries[index].dir && is_supported_rom(out)) {
     dot=strrchr(out,'.');
     if(dot) out[(size_t)(dot-out)]='\0';
   }
@@ -739,6 +715,7 @@ static void display_entry_title(int index,char *out,size_t cap) {
   /* Identify the file format in the menu without changing the actual path. */
   if(!entries[index].dir && is_nes(entries[index].name)) suffix=" [NES]";
   else if(!entries[index].dir && is_zip(entries[index].name)) suffix=" [ZIP]";
+  else if(!entries[index].dir && is_supported_rom(entries[index].name)) suffix=" [NES]";
   if(suffix && strlen(out)<cap-1)
     strncat(out,suffix,cap-strlen(out)-1);
 }
@@ -893,7 +870,12 @@ static void load_game_cheats(void) {
   }
   fileXioClose(fd); buffer[total]='\0';
   n=parse_cht_buffer((char *)buffer); free(buffer);
-  state_set_message(n>0?"NES CHT LOADED":"EMPTY OR UNKNOWN CHT");
+  if(n>0) {
+    apply_enabled_cheats();
+    state_set_message("NES CHT LOADED");
+  } else {
+    state_set_message("EMPTY OR UNKNOWN CHT");
+  }
 }
           /* Core-dependent cheat application is intentionally absent in Interface Edition. */
           /* Core-dependent cheat application is intentionally absent in Interface Edition. */
@@ -901,291 +883,66 @@ static void load_game_cheats(void) {
              Actual cheat application is deferred until the FCEUmm core is integrated. */
           /* Core-dependent cheat application is intentionally absent in Interface Edition. */
           static void disable_all_cheats(void) {
-  unsigned int i; for(i=0;i<active_cheat_count;i++) fceu_cheats[i].enabled=0;
+  unsigned int i;
+  for(i=0;i<active_cheat_count;i++) fceu_cheats[i].enabled=0;
+  fceumm_core_clear_cheats();
   state_set_message("ALL NES CHEATS OFF");
+}
+static void apply_enabled_cheats(void) {
+  unsigned int i;
+  unsigned int applied=0, unsupported=0;
+  fceumm_core_clear_cheats();
+  for(i=0;i<active_cheat_count;i++) {
+    if(!fceu_cheats[i].enabled) continue;
+    if(fceumm_core_add_cheat(fceu_cheats[i].desc[0]?fceu_cheats[i].desc:"NES CHEAT",
+                             fceu_cheats[i].code))
+      ++applied;
+    else
+      ++unsupported;
+  }
+  if(applied)
+    state_set_message(unsupported?"CHEATS APPLIED - SOME UNSUPPORTED":"NES CHEATS APPLIED");
+  else if(unsupported)
+    state_set_message("UNSUPPORTED NES CHEAT CODE");
+  else
+    state_set_message("NO ACTIVE CHEATS");
 }
           static void unload_game(void) {
   interface_session_active=0;
+  fceumm_core_clear_cheats();
+  fceumm_core_close_game();
+  if(audio_ready) (void)audsrv_stop_audio();
   active_cheat_count=0; active_cht_path[0]='\0';
-  if(game_data) { free(game_data); game_data=NULL; }
-  game_size=0; game_member_path[0]='\0';
+  game_member_path[0]='\0';
   memset(fceu_cheats,0,sizeof(fceu_cheats));
 }
-          static uint16_t zip_u16(const unsigned char *p) {
-            return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
-          }
-          static uint32_t zip_u32(const unsigned char *p) {
-            return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                   ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-          }
-          static int zip_member_is_nes(const unsigned char *name, size_t n) {
-  if(!name || n<4) return 0;
-  return name[n-4]=='.' &&
-    tolower((unsigned char)name[n-3])=='n' &&
-    tolower((unsigned char)name[n-2])=='e' &&
-    tolower((unsigned char)name[n-1])=='s';
-}
-          /* Supports standard single-disk ZIP files with one .nes member, using
-             stored (method 0) or raw DEFLATE (method 8). ZIP64/encrypted entries
-             and multi-volume archives are deliberately rejected with an error code. */
-          static int extract_nes_from_zip(const unsigned char *zip, size_t zip_size) {
-  size_t min_eocd, eocd, cd_off, cd_size, cd_end, pos;
-  uint16_t entries, i;
-  if(!zip || zip_size<22) return -200;
-  min_eocd=zip_size>65557u ? zip_size-65557u : 0u;
-  eocd=zip_size-22u;
-  for(;;) {
-    if(zip_u32(zip+eocd)==0x06054b50u) break;
-    if(eocd==min_eocd) return -201;
-    --eocd;
-  }
-  if(eocd+22u>zip_size || eocd+22u+(size_t)zip_u16(zip+eocd+20u)>zip_size) return -202;
-  if(zip_u16(zip+eocd+4u)!=0 || zip_u16(zip+eocd+6u)!=0 ||
-     zip_u16(zip+eocd+8u)!=zip_u16(zip+eocd+10u)) return -203;
-  entries=zip_u16(zip+eocd+10u);
-  cd_size=(size_t)zip_u32(zip+eocd+12u);
-  cd_off=(size_t)zip_u32(zip+eocd+16u);
-  if(entries==0xffffu || cd_size==0xffffffffu || cd_off==0xffffffffu) return -204;
-  if(cd_off>zip_size || cd_size>zip_size-cd_off) return -205;
-  cd_end=cd_off+cd_size;
-  if(cd_end>eocd) return -206;
-  pos=cd_off;
-  for(i=0;i<entries;i++) {
-    uint16_t flags, method, name_len, extra_len, comment_len, disk_start;
-    uint32_t crc_expected, comp_size32, uncomp_size32, local_off32;
-    size_t entry_len, local_off, data_off, comp_size, uncomp_size;
-    const unsigned char *name;
-    if(pos>cd_end || cd_end-pos<46u || zip_u32(zip+pos)!=0x02014b50u) return -207;
-    flags=zip_u16(zip+pos+8u); method=zip_u16(zip+pos+10u);
-    crc_expected=zip_u32(zip+pos+16u); comp_size32=zip_u32(zip+pos+20u);
-    uncomp_size32=zip_u32(zip+pos+24u); name_len=zip_u16(zip+pos+28u);
-    extra_len=zip_u16(zip+pos+30u); comment_len=zip_u16(zip+pos+32u);
-    disk_start=zip_u16(zip+pos+34u); local_off32=zip_u32(zip+pos+42u);
-    entry_len=46u+(size_t)name_len+(size_t)extra_len+(size_t)comment_len;
-    if(entry_len>cd_end-pos) return -208;
-    name=zip+pos+46u; pos+=entry_len;
-    if(!zip_member_is_nes(name,name_len)) continue;
-    if((flags&1u)!=0 || disk_start!=0) return -209;
-    if(comp_size32==0xffffffffu || uncomp_size32==0xffffffffu || local_off32==0xffffffffu) return -210;
-    comp_size=(size_t)comp_size32; uncomp_size=(size_t)uncomp_size32; local_off=(size_t)local_off32;
-    if(!uncomp_size || uncomp_size>ROM_LIMIT || comp_size>ROM_LIMIT) return -211;
-    if(local_off>zip_size || zip_size-local_off<30u || zip_u32(zip+local_off)!=0x04034b50u) return -212;
-    data_off=local_off+30u+(size_t)zip_u16(zip+local_off+26u)+(size_t)zip_u16(zip+local_off+28u);
-    if(data_off>zip_size || comp_size>zip_size-data_off) return -213;
-    game_data=(unsigned char *)malloc(uncomp_size);
-    if(!game_data) return -214;
-    if(method==0) {
-      if(comp_size!=uncomp_size) { free(game_data); game_data=NULL; return -215; }
-      memcpy(game_data,zip+data_off,uncomp_size);
-    } else if(method==8) {
-      z_stream stream; int zr; memset(&stream,0,sizeof(stream));
-      stream.next_in=(Bytef *)(zip+data_off); stream.avail_in=(uInt)comp_size;
-      stream.next_out=(Bytef *)game_data; stream.avail_out=(uInt)uncomp_size;
-      zr=inflateInit2(&stream,-MAX_WBITS);
-      if(zr!=Z_OK) { free(game_data); game_data=NULL; return -216; }
-      zr=inflate(&stream,Z_FINISH); inflateEnd(&stream);
-      if(zr!=Z_STREAM_END || stream.total_out!=(uLong)uncomp_size) { free(game_data); game_data=NULL; return -217; }
-    } else { free(game_data); game_data=NULL; return -218; }
-    {
-      uLong calculated_crc=crc32(0L,Z_NULL,0);
-      calculated_crc=crc32(calculated_crc,(const Bytef *)game_data,(uInt)uncomp_size);
-      if((uint32_t)calculated_crc!=crc_expected) { free(game_data); game_data=NULL; return -219; }
-    }
-    game_size=uncomp_size;
-    if(name_len>=sizeof(game_member_path)) { free(game_data); game_data=NULL; game_size=0; return -220; }
-    memcpy(game_member_path,name,name_len); game_member_path[name_len]='\0';
-    return 0;
-  }
-  return -221;
-}
-          /* ZIP member extracted in memory for file validation; no core is loaded. */
-/* ZIP temporary ROM writer omitted in interface-only build. */
-static int read_full_game(const char *path) {
-            int fd,n;
-            size_t off=0, sz;
-            unsigned char *file_data;
-            memset(&stat_buf,0,sizeof(stat_buf));
-            n=fileXioGetStat(path,&stat_buf);
-            if(n<0)return n;
-            if(stat_buf.hisize || !stat_buf.size || stat_buf.size>ROM_LIMIT)return -100;
-            sz=(size_t)stat_buf.size;
-            file_data=(unsigned char *)malloc(sz);
-            if(!file_data)return -101;
-            fd=fileXioOpen(path,FIO_O_RDONLY);
-            if(fd<0){free(file_data);return fd;}
-            if(fileXioLseek(fd,0,FIO_SEEK_SET)!=0) {
-              fileXioClose(fd); free(file_data); return -102;
-            }
-            while(off<sz) {
-              int want=(int)(sz-off);
-              if(want>(int)sizeof(readbuf))want=(int)sizeof(readbuf);
-              n=fileXioRead(fd,readbuf,want);
-              if(n<=0 || n>want) {
-                fileXioClose(fd); free(file_data); return n<0?n:-103;
-              }
-              memcpy(file_data+off,readbuf,(size_t)n);
-              off+=(size_t)n;
-            }
-            n=fileXioClose(fd);
-            if(n<0){free(file_data);return n;}
-            if(is_zip(path)) {
-              n=extract_nes_from_zip(file_data,sz);
-              free(file_data);
-              if(n<0) return n;
-              return 0;
-            }
-            game_data=file_data;
-            game_size=sz;
-            strncpy(game_member_path,path,sizeof(game_member_path)-1);
-            game_member_path[sizeof(game_member_path)-1]='\0';
-            return 0;
-          }
-          static uint32_t state_hash_bytes(const unsigned char *data, size_t size) {
-            uint32_t h = 2166136261u;
-            size_t i;
-            for(i=0;i<size;i++) { h ^= data[i]; h *= 16777619u; }
-            return h;
-          }
-          static uint32_t state_game_hash(void) {
-            const char *p = game_path;
-            const char *colon = strchr(game_path, ':');
-            uint32_t h = 2166136261u;
-            if(colon && colon[1]=='/') p = colon + 2; /* Ignore mass:/ vs mass0:/ alias. */
-            while(*p) {
-              unsigned char c = (unsigned char)tolower((unsigned char)*p++);
-              h ^= c; h *= 16777619u;
-            }
-            return h;
-          }
           static void state_set_message(const char *message) {
             if(!message) message = "";
             strncpy(state_message, message, sizeof(state_message)-1);
             state_message[sizeof(state_message)-1] = 0;
             state_message_frames = state_message[0] ? 180 : 0;
           }
-          static int state_make_paths(int slot, char *dir1, size_t dir1_cap,
-                                      char *dir2, size_t dir2_cap,
-                                      char *path, size_t path_cap) {
-            const char *root;
-            const char *base;
-            const char *dot;
-            char slug[64];
-            size_t j=0;
-            int n;
-            if(slot<0 || slot>=FCEU_STATE_SLOTS || !game_path[0]) return -1;
-            root = !strncmp(game_path,"mass0:/",7) ? "mass0:/" : "mass:/";
-            n=snprintf(dir1,dir1_cap,"%sFCEUmm",root);
-            if(n<0 || (size_t)n>=dir1_cap) return -2;
-            n=snprintf(dir2,dir2_cap,"%sFCEUmm/STATES",root);
-            if(n<0 || (size_t)n>=dir2_cap) return -3;
-            base=strrchr(game_path,'/'); base=base?base+1:game_path;
-            dot=strrchr(base,'.');
-            while(*base && base!=dot && j<sizeof(slug)-1) {
-              unsigned char c=(unsigned char)*base++;
-              if(isalnum(c)) slug[j++]=(char)toupper(c);
-              else if(j && slug[j-1]!='_') slug[j++]='_';
-            }
-            while(j && slug[j-1]=='_') --j;
-            if(!j) { slug[0]='G'; slug[1]='A'; slug[2]='M'; slug[3]='E'; j=4; }
-            slug[j]=0;
-            n=snprintf(path,path_cap,"%sFCEUmm/STATES/%s_%08X.testslot%d",
-                       root,slug,(unsigned int)state_game_hash(),slot+1);
-            if(n<0 || (size_t)n>=path_cap) return -4;
-            return 0;
-          }
-          static int state_ensure_directory(const char *path) {
-            int d=fileXioDopen(path);
-            if(d>=0) { fileXioDclose(d); return 0; }
-            (void)fileXioMkdir(path,0777);
-            d=fileXioDopen(path);
-            if(d<0) return d;
-            fileXioDclose(d);
-            return 0;
-          }
-          static int state_ensure_directories(const char *dir1,const char *dir2) {
-            if(state_ensure_directory(dir1)<0) return -1;
-            if(state_ensure_directory(dir2)<0) return -2;
-            return 0;
-          }
-          static int state_write_exact(int fd,const void *buffer,size_t size) {
-            const unsigned char *p=(const unsigned char *)buffer;
-            while(size) {
-              int chunk=(size>(size_t)16384)?16384:(int)size;
-              int n=fileXioWrite(fd,(void *)p,chunk);
-              if(n<=0 || n>chunk) return -1;
-              p+=(size_t)n; size-=(size_t)n;
-            }
-            return 0;
-          }
-          static int state_read_exact(int fd,void *buffer,size_t size) {
-            unsigned char *p=(unsigned char *)buffer;
-            while(size) {
-              int chunk=(size>(size_t)16384)?16384:(int)size;
-              int n=fileXioRead(fd,p,chunk);
-              if(n<=0 || n>chunk) return -1;
-              p+=(size_t)n; size-=(size_t)n;
-            }
-            return 0;
-          }
-          static int state_save_slot(int slot) {
-  char dir1[MAX_PATH],dir2[MAX_PATH],path[MAX_PATH],tmp[MAX_PATH];
-  const size_t size=64u;
-  unsigned char *payload;
-  FCEUmmTestStateHeader header;
-  int fd,r;
-  if(!interface_session_active) { state_set_message("NO TEST SESSION"); return -1; }
-  payload=(unsigned char *)calloc(1,size);
-  if(!payload) { state_set_message("TEST SLOT OUT OF MEMORY"); return -3; }
-  memcpy(payload,"FCEUMM-UI-TEST",14);
-  { uint32_t test_hash=state_game_hash(); memcpy(payload+16,&test_hash,sizeof(test_hash)); }
-  memcpy(payload+20,&turbo_i_counter,sizeof(turbo_i_counter));
-  memcpy(payload+24,&turbo_ii_counter,sizeof(turbo_ii_counter));
-  r=state_make_paths(slot,dir1,sizeof(dir1),dir2,sizeof(dir2),path,sizeof(path));
-  if(r<0 || state_ensure_directories(dir1,dir2)<0) { free(payload); state_set_message("STATE USB DIRECTORY ERROR"); return -5; }
-  if(snprintf(tmp,sizeof(tmp),"%s.tmp",path)<0 || strlen(path)+4>=sizeof(tmp)) { free(payload); state_set_message("STATE PATH TOO LONG"); return -6; }
-  memset(&header,0,sizeof(header)); memcpy(header.magic,"FCEUTEST",8);
-  header.version=FCEU_STATE_VERSION; header.game_hash=state_game_hash();
-  header.payload_size=(uint32_t)size; header.payload_hash=state_hash_bytes(payload,size);
-  header.turbo_i_counter=turbo_i_counter; header.turbo_ii_counter=turbo_ii_counter;
-  fd=fileXioOpen(tmp,FIO_O_WRONLY|FIO_O_CREAT|FIO_O_TRUNC);
-  if(fd<0) { free(payload); state_set_message("STATE FILE OPEN ERROR"); return -7; }
-  r=state_write_exact(fd,&header,sizeof(header)); if(r==0) r=state_write_exact(fd,payload,size);
-  if(fileXioClose(fd)<0) r=-1;
-  free(payload);
-  if(r<0) { fileXioRemove(tmp); state_set_message("STATE WRITE ERROR"); return -8; }
-  (void)fileXioRemove(path);
-  if(fileXioRename(tmp,path)<0) { fileXioRemove(tmp); state_set_message("STATE RENAME ERROR"); return -9; }
-  state_set_message("TEST SLOT WRITE OK"); return 0;
-}
-          static int state_load_slot(int slot) {
-  char dir1[MAX_PATH],dir2[MAX_PATH],path[MAX_PATH];
-  FCEUmmTestStateHeader header; unsigned char *payload; int fd,r;
-  const size_t expected=64u;
-  if(!interface_session_active) { state_set_message("NO TEST SESSION"); return -1; }
-  r=state_make_paths(slot,dir1,sizeof(dir1),dir2,sizeof(dir2),path,sizeof(path));
-  if(r<0) { state_set_message("STATE PATH ERROR"); return -3; }
-  memset(&stat_buf,0,sizeof(stat_buf));
-  if(fileXioGetStat(path,&stat_buf)<0 || stat_buf.hisize || stat_buf.size<sizeof(header)) { state_set_message("TEST SLOT EMPTY"); return -4; }
-  fd=fileXioOpen(path,FIO_O_RDONLY); if(fd<0) { state_set_message("STATE OPEN ERROR"); return -5; }
-  r=state_read_exact(fd,&header,sizeof(header));
-  if(r<0) { fileXioClose(fd); state_set_message("STATE HEADER ERROR"); return -6; }
-  if(memcmp(header.magic,"FCEUTEST",8)!=0 || header.version!=FCEU_STATE_VERSION ||
-     header.game_hash!=state_game_hash() || header.payload_size!=expected ||
-     (uint64_t)sizeof(header)+(uint64_t)header.payload_size!=(uint64_t)stat_buf.size) {
-    fileXioClose(fd); state_set_message("TEST SLOT INCOMPATIBLE"); return -7;
+static int state_save_slot(int slot) {
+  int r;
+  if(!interface_session_active || !fceumm_core_is_loaded()) {
+    state_set_message("NO GAME LOADED");
+    return -1;
   }
-  payload=(unsigned char *)malloc(expected);
-  if(!payload) { fileXioClose(fd); state_set_message("TEST SLOT OUT OF MEMORY"); return -8; }
-  r=state_read_exact(fd,payload,expected); if(fileXioClose(fd)<0) r=-1;
-  if(r<0 || state_hash_bytes(payload,expected)!=header.payload_hash || memcmp(payload,"FCEUMM-UI-TEST",14)!=0) {
-    free(payload); state_set_message("TEST SLOT CRC ERROR"); return -9;
-  }
-  free(payload);
-  turbo_i_counter=header.turbo_i_counter; turbo_ii_counter=header.turbo_ii_counter;
-  turbo_i_active=0; turbo_ii_active=0; turbo_updated_this_frame=0;
-  state_set_message("TEST SLOT READ OK"); return 0;
+  r=fceumm_core_save_state(slot);
+  state_set_message(r==0?"REAL STATE SAVED":"STATE SAVE FAILED");
+  return r;
 }
-          static void render_state_menu(void) {
+static int state_load_slot(int slot) {
+  int r;
+  if(!interface_session_active || !fceumm_core_is_loaded()) {
+    state_set_message("NO GAME LOADED");
+    return -1;
+  }
+  r=fceumm_core_load_state(slot);
+  state_set_message(r==0?"REAL STATE LOAD REQUESTED":"STATE SLOT NOT FOUND");
+  return r;
+}
+static void render_state_menu(void) {
             int i;
             char item[48];
             uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
@@ -1193,9 +950,9 @@ static int read_full_game(const char *path) {
             title_screen("SAVE / LOAD STATE");
             label(30,119,1,"UP DOWN X SELECT O BACK",aqua);
             for(i=0;i<13;i++) {
-              if(i<FCEU_STATE_SLOTS) snprintf(item,sizeof(item),"TEST SAVE SLOT %d",i+1);
-              else if(i<FCEU_STATE_SLOTS*2) snprintf(item,sizeof(item),"TEST LOAD SLOT %d",i-FCEU_STATE_SLOTS+1);
-              else if(i==10) snprintf(item,sizeof(item),"RETURN TO TEST SESSION");
+              if(i<FCEU_STATE_SLOTS) snprintf(item,sizeof(item),"SAVE SLOT %d",i+1);
+              else if(i<FCEU_STATE_SLOTS*2) snprintf(item,sizeof(item),"LOAD SLOT %d",i-FCEU_STATE_SLOTS+1);
+              else if(i==10) snprintf(item,sizeof(item),"RETURN TO GAME");
               else if(i==11) snprintf(item,sizeof(item),"NES CHEAT MANAGER");
               else snprintf(item,sizeof(item),"EXIT TO ROM BROWSER");
               label(54,142+i*20,2,item,i==state_menu_selected?aqua:white);
@@ -1221,7 +978,7 @@ static int read_full_game(const char *path) {
   if(cheat_menu_selected<(int)active_cheat_count) {
     FCEUCheat *cheat=&fceu_cheats[cheat_menu_selected];
     cheat->enabled=!cheat->enabled;
-    state_set_message(cheat->enabled?"CHEAT ON - UI ONLY":"CHEAT OFF");
+    apply_enabled_cheats();
   } else if(cheat_menu_selected==(int)active_cheat_count) {
     disable_all_cheats();
   } else { screen=3; buttons_prev=buttons_now; buttons_edge=0; }
@@ -1230,10 +987,10 @@ static int read_full_game(const char *path) {
   int i,first; char item[80];
   uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
   uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
-  title_screen("NES CHEATS - TEST MODE");
+  title_screen("NES CHEAT MANAGER");
   label(12,120,1,"UP DOWN X TOGGLE O BACK",aqua);
   if(active_cheat_count==0) label(12,136,1,"NO MATCHING NES CHT FILE",aqua);
-  else { snprintf(item,sizeof(item),"CHT ENTRIES: %u - UI ONLY",active_cheat_count); label(12,136,1,item,aqua); }
+  else { snprintf(item,sizeof(item),"CHT ENTRIES: %u",active_cheat_count); label(12,136,1,item,aqua); }
   first=cheat_menu_selected-4; if(first<0) first=0;
   if(first>FCEU_CHEAT_MENU_ITEMS-9) first=FCEU_CHEAT_MENU_ITEMS-9;
   if(first<0) first=0;
@@ -1246,7 +1003,7 @@ static int read_full_game(const char *path) {
     label(12,158+(i-first)*26,1,item,i==cheat_menu_selected?aqua:white);
   }
   if(state_message_frames>0 && state_message[0]) label(12,400,1,state_message,aqua);
-  label(12,420,1,"TOGGLES ARE NOT APPLIED WITHOUT FCEUMM CORE",aqua);
+  label(12,420,1,"X TO APPLY / O TO RETURN",aqua);
 }
           static void input_poll(void) {
             if(turbo_updated_this_frame) return;
@@ -1268,39 +1025,59 @@ static int read_full_game(const char *path) {
   snprintf(line,sizeof(line),"LOAD STATUS: %d",status_code); label(24,112,2,line,aqua);
   snprintf(line,sizeof(line),"FILE: %.100s",game_path); label(24,151,1,line,white);
   snprintf(line,sizeof(line),"ROM BYTES: %lu",last_rom_size); label(24,181,1,line,aqua);
-  label(24,211,1,"NO CORE WAS STARTED",white);
+  label(24,211,1,"FCEUMM CORE LOAD FAILED",white);
   label(24,241,1,"ROM HEADER / ZIP CHECK FAILED OR PASSED",white);
   label(24,420,1,"CIRCLE: BACK TO USB BROWSER",aqua);
 }
 static int begin_game(const char *path) {
   int r;
-  last_rom_size=0; 
+  last_rom_size=0;
   unload_game();
-  r=read_full_game(path);
-  if(r<0) return r;
-  last_rom_size=(unsigned long)game_size;
-  if(!game_data || game_size<16u || memcmp(game_data,"NES\x1a",4)!=0) { unload_game(); return -230; }
-  
+
+  memset(&stat_buf,0,sizeof(stat_buf));
+  if(fileXioGetStat(path,&stat_buf)>=0 && !stat_buf.hisize)
+    last_rom_size=(unsigned long)stat_buf.size;
+
+  r=fceumm_core_init(gs);
+  if(r<0) return -300+r;
+
+  r=audio_init(22050u);
+  if(r<0) return -320+r;
+  r=fceumm_core_set_audio_rate(audio_rate);
+  if(r<0) return -330+r;
+
+  r=fceumm_core_load_game(path);
+  if(r<0) return -340+r;
+
+  strncpy(game_member_path,path,sizeof(game_member_path)-1);
+  game_member_path[sizeof(game_member_path)-1]='\0';
   interface_session_active=1;
-  (void)audio_init(44100u);
   load_game_cheats();
   return 0;
 }
 static void draw_game(void) {
-  char line[128];
-  uint64_t white=GS_SETREG_RGBAQ(230,240,245,0x80,0);
-  uint64_t aqua=GS_SETREG_RGBAQ(50,210,175,0x80,0);
-  const char *base=strrchr(game_path,'/'); base=base?base+1:game_path;
-  title_screen("INTERFACE TEST MODE");
-  label(32,132,2,"NO EMULATION CORE LOADED",aqua);
-  snprintf(line,sizeof(line),"ROM: %.72s",base); label(24,190,1,line,white);
-  snprintf(line,sizeof(line),"SIZE: %lu BYTES",last_rom_size); label(24,220,1,line,white);
-  label(24,260,1,audio_ready?"AUDSRV MODULE READY":"AUDSRV NOT READY",aqua);
-  snprintf(line,sizeof(line),"TURBO I: %s  TURBO II: %s",turbo_i_active?"ON":"OFF",turbo_ii_active?"ON":"OFF");
-  label(24,290,1,line,white);
-  label(24,350,1,"L1+R1+SELECT: TEST STATES / CHEATS",aqua);
-  label(24,380,1,"L1+R1+START: RETURN TO BROWSER",aqua);
-  label(24,420,1,"CIRCLE / TRIANGLE: TEST TURBO INPUT",white);
+  uint32_t nes_buttons=0;
+  int r;
+
+  /* DualShock -> standard NES controller bit order used by FCEUmm pads.c. */
+  if(buttons_now & PAD_CROSS)  nes_buttons |= 0x01u; /* A */
+  if(buttons_now & PAD_SQUARE) nes_buttons |= 0x02u; /* B */
+  if(buttons_now & PAD_SELECT) nes_buttons |= 0x04u;
+  if(buttons_now & PAD_START)  nes_buttons |= 0x08u;
+  if(buttons_now & PAD_UP)     nes_buttons |= 0x10u;
+  if(buttons_now & PAD_DOWN)   nes_buttons |= 0x20u;
+  if(buttons_now & PAD_LEFT)   nes_buttons |= 0x40u;
+  if(buttons_now & PAD_RIGHT)  nes_buttons |= 0x80u;
+
+  /* Existing frontend turbo buttons remain Circle (A) and Triangle (B). */
+  if(turbo_i_active)  nes_buttons |= 0x01u;
+  if(turbo_ii_active) nes_buttons |= 0x02u;
+
+  r=fceumm_core_run_frame(nes_buttons);
+  if(r<0) {
+    title_screen("FCEUMM FRAME ERROR");
+    label(24,220,2,"CORE FRAME FAILED",GS_SETREG_RGBAQ(255,90,90,0x80,0));
+  }
 }
           int main(int argc,char **argv) {
             (void)argc;(void)argv;
@@ -1438,7 +1215,7 @@ static void draw_game(void) {
                 input_a_value=0;
                 input_b_value=0;
           #endif
-                /* Interface-only test loop. */
+                /* Run one real FCEUmm emulation frame. */
                 turbo_updated_this_frame=0;
                 input_poll();
                 draw_game();
