@@ -87,3 +87,12 @@ The FCEUmm-PS2 0.3.3 source is included under `src/core/`. Its upstream
 license notices in redistributed source builds.
 
 No commercial ROMs or game BIOS files are bundled.
+
+
+## Freeze diagnosis build
+
+For the current test where a game opens but freezes, use the files in this
+debug package. The frontend writes `FCEUMM-DEBUG.LOG` to the USB `FCEUmm`
+folder, displays frame counters, and traces the core, video, audio and GS
+render stages. The gameplay GS sync/queue order is aligned with the original
+FCEUmm-PS2 renderer. See `DEBUG-LEIA-ANTES.txt` for the test procedure.

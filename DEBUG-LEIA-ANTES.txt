@@ -1,0 +1,57 @@
+FCEUmm PS2 — FREEZE DEBUG BUILD
+================================
+
+This is a diagnostic build, not the final release build.
+
+WHAT IT DOES
+------------
+- Writes progress events to FCEUmm/FCEUMM-DEBUG.LOG on the USB drive.
+- Traces core initialization, ROM loading, each early emulation frame,
+  video texture upload, audio submission, GS sync and GS queue execution.
+- Displays a small DBG A/C/S/E counter line over the game image.
+- Uses the original FCEUmm-PS2 rendering order for gameplay:
+  1) gsKit_sync_flip()
+  2) gsKit_queue_exec()
+  3) audsrv_play_audio()
+  The previous bridge submitted audio before the game video was
+  synchronized and queued. This debug build follows the original
+  FCEUmm-PS2 driver sequence and traces each stage.
+
+USB LOG LOCATION
+----------------
+Preferred:
+  mass:/FCEUmm/FCEUMM-DEBUG.LOG
+
+Fallbacks:
+  mass0:/FCEUmm/FCEUMM-DEBUG.LOG
+  mass:/FCEUMM-DEBUG.LOG
+
+TEST PROCEDURE
+--------------
+1. Keep the USB structure unchanged:
+     FCEUmm/nes roms/
+     FCEUmm/images/
+     FCEUmm/cheats/
+     FCEUmm/STATES/
+2. Install the debug ELF produced by the existing
+   "FCEUmm Core Integration Build" workflow.
+3. Launch the same NES ROM that previously froze.
+4. Let it run for about 10–15 seconds, or until it freezes.
+5. If the game is still responsive, use L1+R1+START to return to the
+   ROM browser before powering off. If it is fully frozen, power off
+   normally; each diagnostic event is flushed to the log.
+6. Retrieve FCEUMM-DEBUG.LOG from the FCEUmm folder (or the fallback path)
+   and send it with a photo of the frozen screen.
+
+HOW TO READ THE LAST LOG ENTRY
+------------------------------
+FRAME_EMULATE_ENTER       = freeze is inside FCEUI_Emulate().
+FRAME_TEXTURE_UPLOAD...   = freeze is in GS texture upload.
+FRAME_AUDIO_PLAY_ENTER    = freeze is in audsrv_play_audio().
+GS_SYNC_ENTER             = freeze is in GS sync/flip.
+GS_QUEUE_ENTER            = freeze is in GS queue execution.
+FRAME_DONE                = core frame completed; inspect later GS/audio entries.
+FRAME_HEARTBEAT           = successful frame heartbeat (every 30 frames).
+
+Do not change ROM names, folders, cheats, save states, background or USB
+driver files for this test. Keep the previous working ELF as a backup.

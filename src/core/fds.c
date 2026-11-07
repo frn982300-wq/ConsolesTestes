@@ -105,7 +105,7 @@ static void FDSStateRestore(int version) {
 		}
 }
 
-void FDSSound(int c);
+void FDSSound();
 void FDSSoundReset(void);
 void FDSSoundStateAdd(void);
 static void RenderSound(void);

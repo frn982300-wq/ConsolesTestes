@@ -253,3 +253,4 @@ int FCEUI_DatachSet(const uint8 *rcode);
 #ifdef  __cplusplus
 }
 #endif
+

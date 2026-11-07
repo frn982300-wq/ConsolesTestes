@@ -200,6 +200,21 @@ static const unsigned long long glyphs[] = {
             label(45,99,2,subtitle,aqua);
           }
           static void refresh_screen(void) { gsKit_queue_exec(gs); gsKit_sync_flip(gs); }
+          /* Match the original FCEUmm-PS2 renderer: flip/vsync BEFORE executing
+             the persistent game queue.  The menu renderer above remains unchanged. */
+          static void refresh_game_screen(void) {
+            fceumm_core_debug_event("GS_SYNC_ENTER", 0);
+            gsKit_sync_flip(gs);
+            fceumm_core_debug_event("GS_SYNC_DONE", 0);
+            fceumm_core_debug_event("GS_QUEUE_ENTER", 0);
+            gsKit_queue_exec(gs);
+            fceumm_core_debug_event("GS_QUEUE_DONE", 0);
+            fceumm_core_debug_event("GS_AUDIO_FLUSH_ENTER", 0);
+            {
+              int audio_flush_result = fceumm_core_audio_flush();
+              fceumm_core_debug_event("GS_AUDIO_FLUSH_DONE", audio_flush_result);
+            }
+          }
           static void pad_scan(void) {
             int s, n;
             buttons_prev=buttons_now;
@@ -1048,6 +1063,7 @@ static void render_state_menu(void) {
 }
 static int begin_game(const char *path) {
   int r;
+  fceumm_core_debug_event("FRONTEND_BEGIN_GAME", 0);
   last_rom_size=0;
   unload_game();
 
@@ -1056,20 +1072,25 @@ static int begin_game(const char *path) {
     last_rom_size=(unsigned long)stat_buf.size;
 
   r=fceumm_core_init(gs);
+  fceumm_core_debug_event("FRONTEND_CORE_INIT_RETURN", r);
   if(r<0) return -300+r;
 
   r=audio_init(22050u);
+  fceumm_core_debug_event("FRONTEND_AUDIO_INIT_RETURN", r);
   if(r<0) return -320+r;
   r=fceumm_core_set_audio_rate(audio_rate);
+  fceumm_core_debug_event("FRONTEND_CORE_AUDIO_RATE_RETURN", r);
   if(r<0) return -330+r;
 
   r=fceumm_core_load_game(path);
+  fceumm_core_debug_event("FRONTEND_LOAD_GAME_RETURN", r);
   if(r<0) return -340+r;
 
   strncpy(game_member_path,path,sizeof(game_member_path)-1);
   game_member_path[sizeof(game_member_path)-1]='\0';
   interface_session_active=1;
   load_game_cheats();
+  fceumm_core_debug_event("FRONTEND_GAME_READY", 0);
   return 0;
 }
 static void draw_game(void) {
@@ -1091,7 +1112,16 @@ static void draw_game(void) {
   if(turbo_ii_active) nes_buttons |= 0x02u;
 
   r=fceumm_core_run_frame(nes_buttons);
+  if(r>=0) {
+    unsigned int attempts=0, completed=0;
+    int stage=0, err=0, samples=0, audio_result=0;
+    char dbg[96];
+    fceumm_core_debug_snapshot(&attempts,&completed,&stage,&err,&samples,&audio_result);
+    snprintf(dbg,sizeof(dbg),"DBG A%u C%u S%d E%d",attempts,completed,stage,err);
+    label(8,420,1,dbg,GS_SETREG_RGBAQ(50,210,175,0x80,0));
+  }
   if(r<0) {
+    fceumm_core_debug_event("FRONTEND_FRAME_ERROR", r);
     title_screen("FCEUMM FRAME ERROR");
     label(24,220,2,"CORE FRAME FAILED",GS_SETREG_RGBAQ(255,90,90,0x80,0));
   }
@@ -1240,7 +1270,7 @@ static void draw_game(void) {
                   label(12,430,1,state_message,GS_SETREG_RGBAQ(50,210,175,0x80,0));
                   state_message_frames--;
                 }
-                refresh_screen();
+                refresh_game_screen();
               }
             }
             return 0;

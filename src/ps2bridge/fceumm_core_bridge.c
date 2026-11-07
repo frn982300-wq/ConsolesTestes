@@ -27,11 +27,11 @@
 
 static GSGLOBAL *core_gs;
 static GSTEXTURE nes_texture;
-static u32 *nes_clut;
+static uint32_t *nes_clut;
 static int core_initialized;
 static int core_game_loaded;
 static int core_texture_ready;
-static u32 core_input_word;
+static uint32_t core_input_word;
 static unsigned int core_cheat_count;
 static int16_t core_audio_buffer[FCEUMM_AUDIO_MAX_SAMPLES];
 
@@ -42,8 +42,84 @@ static char core_nv_dir[160];
    FCEUI_AddCheat. Disable the legacy native .cht auto-loader for this port. */
 static char core_native_cheat_dir[160];
 
+static FILE *core_debug_file;
+static int core_debug_open_attempted;
+static volatile int core_debug_stage;
+static unsigned int core_frame_attempts;
+static unsigned int core_frame_completed;
+static int core_debug_last_error;
+static int core_debug_last_samples;
+static int core_debug_last_audio_result;
+static int core_pending_samples;
+
+static void core_debug_open(void)
+{
+    if (core_debug_open_attempted)
+        return;
+    core_debug_open_attempted = 1;
+    core_debug_file = fopen("mass:/FCEUmm/FCEUMM-DEBUG.LOG", "w");
+    if (!core_debug_file)
+        core_debug_file = fopen("mass0:/FCEUmm/FCEUMM-DEBUG.LOG", "w");
+    if (!core_debug_file)
+        core_debug_file = fopen("mass:/FCEUMM-DEBUG.LOG", "w");
+    if (core_debug_file) {
+        fprintf(core_debug_file, "FCEUMM PS2 DEBUG START\n");
+        fflush(core_debug_file);
+    }
+}
+
+static void core_debug_write(const char *event, int value, const char *detail)
+{
+    unsigned int f = core_frame_attempts;
+    int throttled = 0;
+
+    if (event && !strcmp(event, "FRAME_HEARTBEAT")) {
+        if (f > 10 && (f % 30u) != 0)
+            throttled = 1;
+    } else if (event && (!strncmp(event, "FRAME_", 6) || !strncmp(event, "GS_", 3))) {
+        /* Capture every stage of the first 10 frames, then one sample/second. */
+        if (f > 10 && (f % 60u) != 0)
+            throttled = 1;
+    }
+    if (throttled)
+        return;
+
+    core_debug_open();
+    if (core_debug_file) {
+        fprintf(core_debug_file,
+                "event=%s value=%d attempts=%u completed=%u stage=%d samples=%d audio=%d",
+                event ? event : "NULL", value,
+                core_frame_attempts, core_frame_completed,
+                core_debug_stage, core_debug_last_samples,
+                core_debug_last_audio_result);
+        if (detail && detail[0])
+            fprintf(core_debug_file, " detail=%s", detail);
+        fputc('\n', core_debug_file);
+        fflush(core_debug_file);
+    }
+}
+
+void fceumm_core_debug_event(const char *event, int value)
+{
+    core_debug_write(event, value, NULL);
+}
+
+void fceumm_core_debug_snapshot(unsigned int *attempts, unsigned int *completed,
+                                int *stage, int *last_error, int *last_samples,
+                                int *last_audio_result)
+{
+    if (attempts) *attempts = core_frame_attempts;
+    if (completed) *completed = core_frame_completed;
+    if (stage) *stage = core_debug_stage;
+    if (last_error) *last_error = core_debug_last_error;
+    if (last_samples) *last_samples = core_debug_last_samples;
+    if (last_audio_result) *last_audio_result = core_debug_last_audio_result;
+}
+
 static int core_setup_video(void)
 {
+    core_debug_stage = 20;
+    core_debug_write("VIDEO_SETUP_BEGIN", 0, NULL);
     memset(&nes_texture, 0, sizeof(nes_texture));
 
     nes_texture.PSM = GS_PSM_T8;
@@ -53,9 +129,9 @@ static int core_setup_video(void)
     nes_texture.TBW = 4;
     nes_texture.Filter = GS_FILTER_NEAREST;
 
-    nes_clut = (u32 *)memalign(128, gsKit_texture_size_ee(16, 16, GS_PSM_CT32));
-    if (!nes_clut)
-        return -1;
+    nes_clut = (uint32_t *)memalign(128, gsKit_texture_size_ee(16, 16, GS_PSM_CT32));
+    if (!nes_clut) { core_debug_last_error = -1; core_debug_write("VIDEO_CLUT_ALLOC_FAIL", -1, NULL); return -1; }
+    core_debug_write("VIDEO_CLUT_ALLOC_OK", 0, NULL);
 
     memset(nes_clut, 0, gsKit_texture_size_ee(16, 16, GS_PSM_CT32));
     nes_texture.Clut = nes_clut;
@@ -64,16 +140,16 @@ static int core_setup_video(void)
         gsKit_texture_size(16, 16, GS_PSM_CT32),
         GSKIT_ALLOC_USERBUFFER
     );
-    if (!nes_texture.VramClut)
-        return -2;
+    if (!nes_texture.VramClut) { core_debug_last_error = -2; core_debug_write("VIDEO_VRAM_CLUT_FAIL", -2, NULL); return -2; }
+    core_debug_write("VIDEO_VRAM_CLUT_OK", 0, NULL);
 
     nes_texture.Vram = gsKit_vram_alloc(
         core_gs,
         gsKit_texture_size(FCEUMM_VIDEO_WIDTH, FCEUMM_VIDEO_HEIGHT, GS_PSM_T8),
         GSKIT_ALLOC_USERBUFFER
     );
-    if (!nes_texture.Vram)
-        return -3;
+    if (!nes_texture.Vram) { core_debug_last_error = -3; core_debug_write("VIDEO_VRAM_FAIL", -3, NULL); return -3; }
+    core_debug_write("VIDEO_VRAM_OK", 0, NULL);
 
     core_texture_ready = 1;
     return 0;
@@ -82,23 +158,23 @@ static int core_setup_video(void)
 static void core_update_palette(void)
 {
     int i;
-    uint8 r, g, b;
+    uint8_t r, g, b;
 
     if (!nes_clut)
         return;
 
     for (i = 0; i < 256; ++i) {
         FCEUD_GetPalette((uint8)i, &r, &g, &b);
-        nes_clut[i] = ((u32)b << 16) |
-                      ((u32)g << 8) |
-                      (u32)r;
+        nes_clut[i] = ((uint32_t)b << 16) |
+                      ((uint32_t)g << 8) |
+                      (uint32_t)r;
     }
 
     /* Match the CLUT ordering used by the tested FCEUmm-PS2 renderer. */
     for (i = 0; i < 256; ++i) {
         int modi = i & 63;
         if ((modi >= 8 && modi < 16) || (modi >= 40 && modi < 48)) {
-            u32 tmp = nes_clut[i];
+            uint32_t tmp = nes_clut[i];
             nes_clut[i] = nes_clut[i + 8];
             nes_clut[i + 8] = tmp;
         }
@@ -129,6 +205,8 @@ static int core_set_game_paths(const char *rom_path)
 
 int fceumm_core_init(GSGLOBAL *gs)
 {
+    core_debug_stage = 1;
+    core_debug_write("CORE_INIT_ENTER", 0, NULL);
     if (core_initialized)
         return 0;
     if (!gs)
@@ -136,8 +214,8 @@ int fceumm_core_init(GSGLOBAL *gs)
 
     core_gs = gs;
 
-    if (!FCEUI_Initialize())
-        return -2;
+    if (!FCEUI_Initialize()) { core_debug_last_error = -2; core_debug_write("FCEUI_INITIALIZE_FAIL", -2, NULL); return -2; }
+    core_debug_write("FCEUI_INITIALIZE_OK", 0, NULL);
 
     FCEUI_SetVidSystem(0);              /* NTSC default */
     FCEUI_SetGameGenie(1);
@@ -150,6 +228,8 @@ int fceumm_core_init(GSGLOBAL *gs)
     core_input_word = 0;
     core_cheat_count = 0;
     core_initialized = 1;
+    core_debug_stage = 2;
+    core_debug_write("CORE_INIT_DONE", 0, NULL);
     return 0;
 }
 
@@ -168,8 +248,9 @@ int fceumm_core_load_game(const char *path)
     FCEUGI *loaded;
     int result;
 
-    if (!core_initialized || !path || !path[0])
-        return -1;
+    core_debug_stage = 3;
+    core_debug_write("LOAD_GAME_ENTER", 0, path);
+    if (!core_initialized || !path || !path[0]) { core_debug_last_error = -1; core_debug_write("LOAD_GAME_BAD_ARGS", -1, path); return -1; }
 
     if (core_game_loaded)
         fceumm_core_close_game();
@@ -179,8 +260,8 @@ int fceumm_core_load_game(const char *path)
         return -10 + result;
 
     loaded = FCEUI_LoadGame(path);
-    if (!loaded)
-        return -20;
+    if (!loaded) { core_debug_last_error = -20; core_debug_write("FCEUI_LOAD_GAME_FAIL", -20, path); return -20; }
+    core_debug_write("FCEUI_LOAD_GAME_OK", 0, path);
 
     /* The PS2 port's pads.c consumes a packed 32-bit word:
        player 1 in bits 0..7, player 2 in bits 8..15. */
@@ -191,6 +272,8 @@ int fceumm_core_load_game(const char *path)
     if (!core_texture_ready) {
         result = core_setup_video();
         if (result < 0) {
+            core_debug_last_error = -30 + result;
+            core_debug_write("VIDEO_SETUP_FAIL", -30 + result, NULL);
             FCEUI_CloseGame();
             return -30 + result;
         }
@@ -198,6 +281,8 @@ int fceumm_core_load_game(const char *path)
 
     core_update_palette();
     core_game_loaded = 1;
+    core_debug_stage = 4;
+    core_debug_write("GAME_LOADED_READY", 0, path);
 
     core_gs->DrawOrder = GS_OS_PER;
     gsKit_mode_switch(core_gs, GS_PERSISTENT);
@@ -214,6 +299,7 @@ void fceumm_core_close_game(void)
     }
     core_input_word = 0;
     core_cheat_count = 0;
+    core_pending_samples = 0;
 
     if (core_gs)
         gsKit_mode_switch(core_gs, GS_ONESHOT);
@@ -227,22 +313,41 @@ int fceumm_core_is_loaded(void)
 int fceumm_core_run_frame(uint32_t nes_buttons)
 {
     uint8_t *frame = NULL;
-    int32 *sound = NULL;
-    int32 sample_count = 0;
+    int32_t *sound = NULL;
+    int32_t sample_count = 0;
     int i;
     int samples_to_play;
 
-    if (!core_game_loaded || !core_gs || !core_texture_ready)
+    if (!core_game_loaded || !core_gs || !core_texture_ready) {
+        core_debug_last_error = -1;
+        core_debug_write("FRAME_NOT_READY", -1, NULL);
         return -1;
+    }
 
-    core_input_word = (u32)nes_buttons;
+    core_input_word = nes_buttons;
+    ++core_frame_attempts;
+    core_debug_stage = 10;
+    core_debug_write("FRAME_EMULATE_ENTER", (int)nes_buttons, NULL);
+
+    /* If the game hangs inside the emulator, the USB log retains this entry. */
     FCEUI_Emulate(&frame, &sound, &sample_count, 0);
 
-    if (!frame)
-        return -2;
+    core_debug_stage = 11;
+    core_debug_last_samples = (int)sample_count;
+    core_debug_write("FRAME_EMULATE_RETURN", (int)sample_count,
+                     frame ? "FRAME_OK" : "FRAME_NULL");
 
-    nes_texture.Mem = (u32 *)frame;
+    if (!frame) {
+        core_debug_last_error = -2;
+        core_debug_write("FRAME_NULL_VIDEO", -2, NULL);
+        return -2;
+    }
+
+    core_debug_stage = 12;
+    nes_texture.Mem = (uint32_t *)frame;
+    core_debug_write("FRAME_TEXTURE_UPLOAD_ENTER", 0, NULL);
     gsKit_texture_upload(core_gs, &nes_texture);
+    core_debug_write("FRAME_TEXTURE_UPLOAD_DONE", 0, NULL);
 
     gsKit_clear(core_gs, GS_SETREG_RGBA(0, 0, 0, 0));
     gsKit_prim_sprite_texture(
@@ -251,23 +356,51 @@ int fceumm_core_run_frame(uint32_t nes_buttons)
         640.0f, 448.0f, 256.0f, 232.0f,
         2, GS_SETREG_RGBA(0x80, 0x80, 0x80, 0x00)
     );
+    core_debug_write("FRAME_SPRITE_QUEUED", 0, NULL);
 
+    core_pending_samples = 0;
     if (sound && sample_count > 0) {
         samples_to_play = sample_count;
         if (samples_to_play > FCEUMM_AUDIO_MAX_SAMPLES)
             samples_to_play = FCEUMM_AUDIO_MAX_SAMPLES;
 
         for (i = 0; i < samples_to_play; ++i) {
-            int32 sample = sound[i];
+            int32_t sample = sound[i];
             if (sample > 32767) sample = 32767;
             if (sample < -32768) sample = -32768;
             core_audio_buffer[i] = (int16_t)sample;
         }
-        (void)audsrv_play_audio((char *)core_audio_buffer,
-                                samples_to_play * (int)sizeof(int16_t));
+        core_pending_samples = samples_to_play;
+        core_debug_write("FRAME_AUDIO_BUFFER_READY", samples_to_play, NULL);
+    } else {
+        core_debug_last_audio_result = 0;
+        core_debug_write("FRAME_NO_AUDIO", (int)sample_count, NULL);
     }
 
+    ++core_frame_completed;
+    core_debug_stage = 14;
+    core_debug_last_error = 0;
+    core_debug_write("FRAME_DONE", 0, NULL);
+    core_debug_write("FRAME_HEARTBEAT", 0, NULL);
     return 0;
+}
+
+
+/* Original FCEUmm-PS2 order is video sync/queue first, then audsrv playback. */
+int fceumm_core_audio_flush(void)
+{
+    int result;
+    if (!core_game_loaded || core_pending_samples <= 0)
+        return 0;
+
+    core_debug_stage = 13;
+    core_debug_write("FRAME_AUDIO_PLAY_ENTER", core_pending_samples, NULL);
+    result = audsrv_play_audio((char *)core_audio_buffer,
+                               core_pending_samples * (int)sizeof(int16_t));
+    core_debug_last_audio_result = result;
+    core_debug_write("FRAME_AUDIO_PLAY_DONE", result, NULL);
+    core_pending_samples = 0;
+    return result;
 }
 
 static char *core_state_filename(int slot)
@@ -409,6 +542,7 @@ int fceumm_core_add_cheat(const char *name, const char *code)
 
 void fceumm_core_shutdown(void)
 {
+    core_debug_write("CORE_SHUTDOWN", 0, NULL);
     fceumm_core_close_game();
     if (core_initialized) {
         FCEUI_Kill();
@@ -420,4 +554,5 @@ void fceumm_core_shutdown(void)
     }
     core_texture_ready = 0;
     core_gs = NULL;
+    if (core_debug_file) { fclose(core_debug_file); core_debug_file = NULL; }
 }
