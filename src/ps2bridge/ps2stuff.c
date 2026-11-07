@@ -115,3 +115,41 @@ DUMMY(FCEUD_AviStop)
 void FCEUI_AviVideoUpdate(const unsigned char* buffer) { /*FCEU_DispMessage("Not implemented.");*/ }
 int FCEUD_ShowStatusIcon(void) { /*FCEU_DispMessage("Not implemented.");*/ return 0; }
 int FCEUI_AviIsRecording(void) { return 0; }
+
+
+/*
+ * PS2 compatibility stubs for optional desktop-only facilities.
+ *
+ * The PPU viewer is a desktop debugging window.  The PS2 frontend renders
+ * through GSKit, so keep the viewer disabled and provide no-op symbols for
+ * the core's optional debug hook.
+ */
+#include "../core/ppuview.h"
+
+int PPUViewScanline = 0;
+int PPUViewer = 0;
+
+void PPUViewDoBlit(void)
+{
+}
+
+void DoPPUView(void)
+{
+}
+
+void UpdatePPUView(int refreshchr)
+{
+    (void)refreshchr;
+}
+
+/*
+ * The Transformer board can read a keyboard.  The PS2 frontend currently
+ * has no keyboard device mapping; return a stable, zeroed 256-byte key map
+ * instead of the desktop driver's missing symbol or an unsafe empty string.
+ * Standard gamepad-based NES/Famicom games are unaffected.
+ */
+char *GetKeyboard(void)
+{
+    static char ps2_keyboard_state[256] = { 0 };
+    return ps2_keyboard_state;
+}
