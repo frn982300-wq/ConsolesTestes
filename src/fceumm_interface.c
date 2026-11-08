@@ -209,11 +209,8 @@ static const unsigned long long glyphs[] = {
             fceumm_core_debug_event("GS_QUEUE_ENTER", 0);
             gsKit_queue_exec(gs);
             fceumm_core_debug_event("GS_QUEUE_DONE", 0);
-            fceumm_core_debug_event("GS_AUDIO_FLUSH_ENTER", 0);
-            {
-              int audio_flush_result = fceumm_core_audio_flush();
-              fceumm_core_debug_event("GS_AUDIO_FLUSH_DONE", audio_flush_result);
-            }
+            /* AUDIO DISABLED TEST: do not call audsrv or flush core audio. */
+            fceumm_core_debug_event("GS_AUDIO_DISABLED_TEST", 0);
           }
           static void pad_scan(void) {
             int s, n;
@@ -282,68 +279,10 @@ static const unsigned long long glyphs[] = {
             return 0;
           }
           static int audio_init(unsigned requested_rate) {
-            int r;
-            int freq;
-            struct audsrv_fmt_t format = { 0 };
-            if(audio_ready) return 0;
-            if(!iop_prepared) {
-              SifLoadFileInit(); SifInitIopHeap(); sbv_patch_enable_lmb(); iop_prepared=1;
-            }
-            /*
-             * Match the known-working FCEUmm-PS2 0.3.3 startup sequence:
-             * load FreeSD first, then audsrv, then initialize audsrv RPC.
-             * The original PS2 driver embeds both IRX modules from PS2SDK.
-             */
-            if(!freesd_module_loaded) {
-              fceumm_core_debug_event("AUDIO_FREESD_LOAD_ENTER", 0);
-              r=load_mod(freesd_irx,size_freesd_irx);
-              fceumm_core_debug_event("AUDIO_FREESD_LOAD_DONE", r);
-              if(r<0) { audio_error=r; return r; }
-              freesd_module_loaded=1;
-            }
-            if(!audio_module_loaded) {
-              fceumm_core_debug_event("AUDIO_AUDSRV_LOAD_ENTER", 0);
-              r=load_mod(audsrv_irx,size_audsrv_irx);
-              fceumm_core_debug_event("AUDIO_AUDSRV_LOAD_DONE", r);
-              if(r<0) { audio_error=r; return r; }
-              audio_module_loaded=1;
-            }
-            if(!audio_rpc_ready) {
-              fceumm_core_debug_event("AUDIO_AUDSRV_INIT_ENTER", 0);
-              r=audsrv_init();
-              fceumm_core_debug_event("AUDIO_AUDSRV_INIT_DONE", r);
-              if(r<0) { audio_error=r; return r; }
-              audio_rpc_ready=1;
-            }
-            /*
-             * Current PS2SDK audsrv API accepts a pointer to audsrv_fmt_t.
-             * This core outputs mono 16-bit samples, so keep channels at 1.
-             */
-            freq=(int)(requested_rate ? requested_rate : 22050);
-            format.freq=freq;
-            format.bits=16;
-            format.channels=1;
-            fceumm_core_debug_event("AUDIO_SET_FORMAT_ENTER", freq);
-            r=audsrv_set_format(&format);
-            fceumm_core_debug_event("AUDIO_SET_FORMAT_DONE", r);
-
-            if(r<0 && freq!=44100) {
-              freq=44100;
-              format.freq=freq;
-              r=audsrv_set_format(&format);
-            }
-            if(r<0 && freq!=11025) {
-              freq=11025;
-              format.freq=freq;
-              r=audsrv_set_format(&format);
-            }
-            if(r<0) { audio_error=r; return r; }
-            fceumm_core_debug_event("AUDIO_SET_VOLUME_ENTER", 90);
-            r=audsrv_set_volume(0x3fff);
-            fceumm_core_debug_event("AUDIO_SET_VOLUME_DONE", r);
-            if(r<0) { audio_error=r; return r; }
-            audio_rate=(unsigned)freq;
-            audio_ready=1; audio_error=0;
+            (void)requested_rate;
+            audio_ready=0;
+            audio_error=0;
+            fceumm_core_debug_event("AUDIO_DISABLED_TEST", 0);
             return 0;
           }
           /* FCEUmm supplies indexed 256x240 frames to the GSKit bridge. */
@@ -961,7 +900,7 @@ static void apply_enabled_cheats(void) {
   interface_session_active=0;
   fceumm_core_clear_cheats();
   fceumm_core_close_game();
-  if(audio_ready) (void)audsrv_stop_audio();
+  /* AUDIO DISABLED TEST: audsrv was never initialized. */
   active_cheat_count=0; active_cht_path[0]='\0';
   game_member_path[0]='\0';
   memset(fceu_cheats,0,sizeof(fceu_cheats));
@@ -1093,12 +1032,10 @@ static int begin_game(const char *path) {
   fceumm_core_debug_event("FRONTEND_CORE_INIT_RETURN", r);
   if(r<0) return -300+r;
 
-  r=audio_init(22050u);
-  fceumm_core_debug_event("FRONTEND_AUDIO_INIT_RETURN", r);
-  if(r<0) return -320+r;
-  r=fceumm_core_set_audio_rate(audio_rate);
-  fceumm_core_debug_event("FRONTEND_CORE_AUDIO_RATE_RETURN", r);
-  if(r<0) return -330+r;
+  /* AUDIO DISABLED TEST:
+     Skip FreeSD/audsrv module loading and do not start audio playback.
+     The core remains unchanged; generated samples are intentionally discarded. */
+  fceumm_core_debug_event("FRONTEND_AUDIO_DISABLED_TEST", 0);
 
   r=fceumm_core_load_game(path);
   fceumm_core_debug_event("FRONTEND_LOAD_GAME_RETURN", r);
