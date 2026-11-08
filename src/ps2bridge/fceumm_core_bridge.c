@@ -44,10 +44,15 @@ static char core_nv_dir[160];
    FCEUI_AddCheat. Disable the legacy native .cht auto-loader for this port. */
 static char core_native_cheat_dir[160];
 
-/* Use FileXio directly: the frontend mounts USB through fileXio, not stdio. */
-static int core_debug_fd = -1;
-static unsigned int core_debug_open_attempts;
+/*
+ * FileXio debug logger.
+ * Use a 64-byte-aligned transfer buffer and close the file after every line.
+ * This makes each checkpoint visible on USB even if the game freezes.
+ */
+static char core_debug_io_buffer[512] __attribute__((aligned(64)));
 static char core_debug_path[96];
+static int core_debug_header_written;
+static unsigned int core_debug_open_attempts;
 static volatile int core_debug_stage;
 static unsigned int core_frame_attempts;
 static unsigned int core_frame_completed;
@@ -56,66 +61,86 @@ static int core_debug_last_samples;
 static int core_debug_last_audio_result;
 static int core_pending_samples;
 
-static int core_debug_write_exact(const char *data, int length)
+static int core_debug_append(const char *text, int length)
 {
-    int done = 0;
-    while (done < length) {
-        int n = fileXioWrite(core_debug_fd, (void *)(data + done), length - done);
-        if (n <= 0 || n > length - done)
-            return -1;
-        done += n;
+    static const char *paths[] = {
+        "mass:/FCEUMM-DEBUG.LOG",
+        "mass0:/FCEUMM-DEBUG.LOG",
+        "mass:/FCEUmm/FCEUMM-DEBUG.LOG",
+        "mass0:/FCEUmm/FCEUMM-DEBUG.LOG"
+    };
+    unsigned int i;
+    unsigned int first = 0;
+    int fd = -1;
+    int written;
+
+    if (!text || length <= 0 || length > (int)sizeof(core_debug_io_buffer))
+        return -1;
+
+    if (text != core_debug_io_buffer)
+        memcpy(core_debug_io_buffer, text, (size_t)length);
+
+    /* Reuse the last successful destination first. */
+    if (core_debug_path[0]) {
+        fd = fileXioOpen(core_debug_path, FIO_O_WRONLY | FIO_O_CREAT);
+        if (fd >= 0) {
+            if (fileXioLseek(fd, 0, FIO_SEEK_END) >= 0) {
+                written = fileXioWrite(fd, core_debug_io_buffer, length);
+                fileXioClose(fd);
+                if (written == length)
+                    return written;
+            } else {
+                fileXioClose(fd);
+            }
+            core_debug_path[0] = '\0';
+        }
     }
-    return done;
+
+    ++core_debug_open_attempts;
+    for (i = first; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        fd = fileXioOpen(paths[i], FIO_O_WRONLY | FIO_O_CREAT);
+        if (fd < 0)
+            continue;
+
+        if (fileXioLseek(fd, 0, FIO_SEEK_END) < 0) {
+            fileXioClose(fd);
+            continue;
+        }
+
+        written = fileXioWrite(fd, core_debug_io_buffer, length);
+        fileXioClose(fd);
+
+        if (written == length) {
+            strncpy(core_debug_path, paths[i], sizeof(core_debug_path) - 1);
+            core_debug_path[sizeof(core_debug_path) - 1] = '\0';
+            return written;
+        }
+    }
+
+    return -1;
 }
 
 static void core_debug_open(void)
 {
-    static const char *paths[] = {
-        "mass:/FCEUmm/FCEUMM-DEBUG.LOG",
-        "mass0:/FCEUmm/FCEUMM-DEBUG.LOG",
-        "mass:/FCEUMM-DEBUG.LOG",
-        "mass0:/FCEUMM-DEBUG.LOG"
-    };
-    unsigned int i;
-    char header[192];
-    int n;
-
-    if (core_debug_fd >= 0 || core_debug_open_attempts >= 8)
+    static const char header[] = "FCEUMM PS2 DEBUG START\n";
+    if (core_debug_header_written)
         return;
-
-    ++core_debug_open_attempts;
-    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
-        core_debug_fd = fileXioOpen(paths[i],
-                                    FIO_O_WRONLY | FIO_O_CREAT | FIO_O_TRUNC);
-        if (core_debug_fd < 0)
-            continue;
-
-        strncpy(core_debug_path, paths[i], sizeof(core_debug_path) - 1);
-        core_debug_path[sizeof(core_debug_path) - 1] = '\0';
-        n = snprintf(header, sizeof(header),
-                     "FCEUMM PS2 DEBUG START\nlog_path=%s\n", core_debug_path);
-        if (n > 0 && n < (int)sizeof(header) &&
-            core_debug_write_exact(header, n) >= 0)
-            return;
-
-        fileXioClose(core_debug_fd);
-        core_debug_fd = -1;
-    }
+    if (core_debug_append(header, (int)(sizeof(header) - 1)) >= 0)
+        core_debug_header_written = 1;
 }
 
 static void core_debug_write(const char *event, int value, const char *detail)
 {
     unsigned int f = core_frame_attempts;
     int throttled = 0;
+    int n;
 
     if (event && !strcmp(event, "FRAME_HEARTBEAT")) {
-        /* Keep detailed heartbeat records through the first 120 frames. */
         if (f > 120 && (f % 30u) != 0)
             throttled = 1;
     } else if (event && (!strncmp(event, "FRAME_", 6) ||
                          !strncmp(event, "GS_", 3) ||
                          !strncmp(event, "FRONTEND_", 9))) {
-        /* Capture every core/frontend stage for the first 120 frames. */
         if (f > 120 && (f % 60u) != 0)
             throttled = 1;
     }
@@ -123,25 +148,19 @@ static void core_debug_write(const char *event, int value, const char *detail)
         return;
 
     core_debug_open();
-    if (core_debug_fd >= 0) {
-        char line[320];
-        int n = snprintf(line, sizeof(line),
-                         "event=%s value=%d attempts=%u completed=%u stage=%d samples=%d audio=%d%s%s\n",
-                         event ? event : "NULL", value,
-                         core_frame_attempts, core_frame_completed,
-                         core_debug_stage, core_debug_last_samples,
-                         core_debug_last_audio_result,
-                         (detail && detail[0]) ? " detail=" : "",
-                         (detail && detail[0]) ? detail : "");
-        if (n > 0 && n < (int)sizeof(line)) {
-            if (core_debug_write_exact(line, n) < 0) {
-                fileXioClose(core_debug_fd);
-                core_debug_fd = -1;
-            }
-        }
-    }
-}
 
+    n = snprintf(core_debug_io_buffer, sizeof(core_debug_io_buffer),
+                 "event=%s value=%d attempts=%u completed=%u stage=%d samples=%d audio=%d%s%s\n",
+                 event ? event : "NULL", value,
+                 core_frame_attempts, core_frame_completed,
+                 core_debug_stage, core_debug_last_samples,
+                 core_debug_last_audio_result,
+                 (detail && detail[0]) ? " detail=" : "",
+                 (detail && detail[0]) ? detail : "");
+
+    if (n > 0 && n < (int)sizeof(core_debug_io_buffer))
+        (void)core_debug_append(core_debug_io_buffer, n);
+}
 void fceumm_core_debug_event(const char *event, int value)
 {
     core_debug_write(event, value, NULL);
@@ -597,8 +616,5 @@ void fceumm_core_shutdown(void)
     }
     core_texture_ready = 0;
     core_gs = NULL;
-    if (core_debug_fd >= 0) {
-        fileXioClose(core_debug_fd);
-        core_debug_fd = -1;
-    }
+    /* FileXio logger closes each write immediately; no open descriptor remains. */
 }
