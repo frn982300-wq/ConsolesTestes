@@ -74,11 +74,17 @@ static void core_debug_write(const char *event, int value, const char *detail)
     int throttled = 0;
 
     if (event && !strcmp(event, "FRAME_HEARTBEAT")) {
-        if (f > 10 && (f % 30u) != 0)
+        /* Keep detailed heartbeat records through the first 120 frames. */
+        if (f > 120 && (f % 30u) != 0)
             throttled = 1;
-    } else if (event && (!strncmp(event, "FRAME_", 6) || !strncmp(event, "GS_", 3))) {
-        /* Capture every stage of the first 10 frames, then one sample/second. */
-        if (f > 10 && (f % 60u) != 0)
+    } else if (event && (!strncmp(event, "FRAME_", 6) ||
+                         !strncmp(event, "GS_", 3) ||
+                         !strncmp(event, "FRONTEND_", 9))) {
+        /*
+         * Capture every core and frontend video stage for the first 120 frames.
+         * This lets us identify a hang on frame 11 or shortly after startup.
+         */
+        if (f > 120 && (f % 60u) != 0)
             throttled = 1;
     }
     if (throttled)
