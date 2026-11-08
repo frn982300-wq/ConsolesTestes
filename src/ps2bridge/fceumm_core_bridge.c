@@ -305,6 +305,27 @@ int fceumm_core_set_audio_rate(unsigned rate)
     return 0;
 }
 
+static void core_setup_persistent_queue(void)
+{
+    if (!core_gs || !core_texture_ready)
+        return;
+
+    core_gs->DrawOrder = GS_OS_PER;
+    gsKit_mode_switch(core_gs, GS_PERSISTENT);
+    gsKit_queue_reset(core_gs->Per_Queue);
+
+    /* Same one-time clear + sprite setup used by FCEUmm-PS2 0.3.3 SetupNESGS(). */
+    core_debug_write("PERSISTENT_QUEUE_SETUP_ENTER", 0, NULL);
+    gsKit_clear(core_gs, GS_SETREG_RGBA(0, 0, 0, 0));
+    gsKit_prim_sprite_texture(
+        core_gs, &nes_texture,
+        0.0f, 0.0f, 0.0f, 8.0f,
+        640.0f, 448.0f, 256.0f, 232.0f,
+        2, GS_SETREG_RGBA(0x80, 0x80, 0x80, 0x00)
+    );
+    core_debug_write("PERSISTENT_QUEUE_SETUP_DONE", 0, NULL);
+}
+
 int fceumm_core_load_game(const char *path)
 {
     FCEUGI *loaded;
@@ -346,25 +367,21 @@ int fceumm_core_load_game(const char *path)
     core_debug_stage = 4;
     core_debug_write("GAME_LOADED_READY", 0, path);
 
-    core_gs->DrawOrder = GS_OS_PER;
-    gsKit_mode_switch(core_gs, GS_PERSISTENT);
-    gsKit_queue_reset(core_gs->Per_Queue);
+    core_setup_persistent_queue();
 
-    /*
-     * Match the original FCEUmm-PS2 0.3.3 SetupNESGS():
-     * clear + sprite are queued ONCE in the persistent queue.
-     * Each frame only updates the texture in VRAM before queue_exec().
-     */
-    core_debug_write("PERSISTENT_QUEUE_SETUP_ENTER", 0, NULL);
-    gsKit_clear(core_gs, GS_SETREG_RGBA(0, 0, 0, 0));
-    gsKit_prim_sprite_texture(
-        core_gs, &nes_texture,
-        0.0f, 0.0f, 0.0f, 8.0f,
-        640.0f, 448.0f, 256.0f, 232.0f,
-        2, GS_SETREG_RGBA(0x80, 0x80, 0x80, 0x00)
-    );
-    core_debug_write("PERSISTENT_QUEUE_SETUP_DONE", 0, NULL);
+    return 0;
+}
 
+int fceumm_core_resume_video(void)
+{
+    if (!core_gs || !core_game_loaded || !core_texture_ready) {
+        core_debug_write("VIDEO_RESUME_REJECTED", -1, NULL);
+        return -1;
+    }
+
+    core_debug_write("VIDEO_RESUME_BEGIN", 0, NULL);
+    core_setup_persistent_queue();
+    core_debug_write("VIDEO_RESUME_DONE", 0, NULL);
     return 0;
 }
 
@@ -378,8 +395,11 @@ void fceumm_core_close_game(void)
     core_cheat_count = 0;
     core_pending_samples = 0;
 
-    if (core_gs)
+    if (core_gs) {
         gsKit_mode_switch(core_gs, GS_ONESHOT);
+        core_gs->DrawOrder = GS_PER_OS;
+        gsKit_queue_reset(core_gs->Os_Queue);
+    }
 }
 
 int fceumm_core_is_loaded(void)
