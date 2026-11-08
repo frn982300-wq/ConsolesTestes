@@ -350,6 +350,21 @@ int fceumm_core_load_game(const char *path)
     gsKit_mode_switch(core_gs, GS_PERSISTENT);
     gsKit_queue_reset(core_gs->Per_Queue);
 
+    /*
+     * Match the original FCEUmm-PS2 0.3.3 SetupNESGS():
+     * clear + sprite are queued ONCE in the persistent queue.
+     * Each frame only updates the texture in VRAM before queue_exec().
+     */
+    core_debug_write("PERSISTENT_QUEUE_SETUP_ENTER", 0, NULL);
+    gsKit_clear(core_gs, GS_SETREG_RGBA(0, 0, 0, 0));
+    gsKit_prim_sprite_texture(
+        core_gs, &nes_texture,
+        0.0f, 0.0f, 0.0f, 8.0f,
+        640.0f, 448.0f, 256.0f, 232.0f,
+        2, GS_SETREG_RGBA(0x80, 0x80, 0x80, 0x00)
+    );
+    core_debug_write("PERSISTENT_QUEUE_SETUP_DONE", 0, NULL);
+
     return 0;
 }
 
@@ -411,14 +426,11 @@ int fceumm_core_run_frame(unsigned int nes_buttons)
     gsKit_texture_upload(core_gs, &nes_texture);
     core_debug_write("FRAME_TEXTURE_UPLOAD_DONE", 0, NULL);
 
-    gsKit_clear(core_gs, GS_SETREG_RGBA(0, 0, 0, 0));
-    gsKit_prim_sprite_texture(
-        core_gs, &nes_texture,
-        0.0f, 0.0f, 0.0f, 8.0f,
-        640.0f, 448.0f, 256.0f, 232.0f,
-        2, GS_SETREG_RGBA(0x80, 0x80, 0x80, 0x00)
-    );
-    core_debug_write("FRAME_SPRITE_QUEUED", 0, NULL);
+    /*
+     * The sprite is already resident in GS_PERSISTENT queue from game setup.
+     * Do not enqueue another clear/sprite per frame: that grows Per_Queue.
+     */
+    core_debug_write("FRAME_TEXTURE_READY_FOR_PERSISTENT_SPRITE", 0, NULL);
 
     core_pending_samples = 0;
     if (sound && sample_count > 0) {
