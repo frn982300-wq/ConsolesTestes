@@ -339,7 +339,7 @@ static const unsigned long long glyphs[] = {
             }
             if(r<0) { audio_error=r; return r; }
             fceumm_core_debug_event("AUDIO_SET_VOLUME_ENTER", 90);
-            r=audsrv_set_volume(90);
+            r=audsrv_set_volume(0x3fff);
             fceumm_core_debug_event("AUDIO_SET_VOLUME_DONE", r);
             if(r<0) { audio_error=r; return r; }
             audio_rate=(unsigned)freq;
