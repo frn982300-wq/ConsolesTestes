@@ -285,7 +285,13 @@ int fceumm_core_init(GSGLOBAL *gs)
     FCEUI_SetSoundVolume(1024);
     FCEUI_SetSoundQuality(0);
     FCEUI_SetLowPass(0);
-    FCEUI_Sound(FCEUMM_AUDIO_RATE);
+    /*
+     * FULL AUDIO-OFF DIAGNOSTIC:
+     * Disable sound generation inside FCEUmm itself, not just audsrv playback.
+     * FCEUI_Sound(0) is the core's documented sound-disable setting.
+     */
+    FCEUI_Sound(0);
+    core_debug_write("CORE_AUDIO_SYNTHESIS_DISABLED", 0, NULL);
 
     core_input_word = 0;
     core_cheat_count = 0;
@@ -297,11 +303,13 @@ int fceumm_core_init(GSGLOBAL *gs)
 
 int fceumm_core_set_audio_rate(unsigned rate)
 {
+    (void)rate;
     if (!core_initialized)
         return -1;
-    if (rate != 11025u && rate != 22050u && rate != 44100u)
-        return -2;
-    FCEUI_Sound((int)rate);
+
+    /* Keep sound synthesis disabled for this isolation test. */
+    FCEUI_Sound(0);
+    core_debug_write("CORE_AUDIO_RATE_IGNORED_AUDIO_OFF_TEST", 0, NULL);
     return 0;
 }
 
