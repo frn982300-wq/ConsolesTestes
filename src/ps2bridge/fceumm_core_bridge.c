@@ -597,5 +597,8 @@ void fceumm_core_shutdown(void)
     }
     core_texture_ready = 0;
     core_gs = NULL;
-    if (core_debug_file) { fclose(core_debug_file); core_debug_file = NULL; }
+    if (core_debug_fd >= 0) {
+        fileXioClose(core_debug_fd);
+        core_debug_fd = -1;
+    }
 }
